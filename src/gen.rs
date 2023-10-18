@@ -1,22 +1,27 @@
-use std::{
-    sync::Arc,
-    collections::HashMap,
-};
-use dashmap::DashMap;
-use frost::Identifier;
-use frost_ed25519::keys::dkg;
-use libp2p::gossipsub::{
-    TopicHash,
-    self,
-};
-use libp2p::PeerId;
-use tokio::select;
-use frost_ed25519 as frost;
 use crate::settings::{
     MAX_SIGNERS,
     MIN_SIGNERS,
 };
 use crate::util::onion_address;
+use anyhow::Result;
+use base64::{
+    engine::general_purpose::STANDARD as b64,
+    Engine,
+};
+use dashmap::DashMap;
+use frost::Identifier;
+use frost_ed25519 as frost;
+use frost_ed25519::keys::dkg;
+use libp2p::gossipsub::{
+    self,
+    TopicHash,
+};
+use libp2p::PeerId;
+use std::{
+    collections::HashMap,
+    sync::Arc,
+};
+use tokio::select;
 
 pub async fn round_one(
     r1_secret_db: Arc<DashMap<String, dkg::round1::SecretPackage>>,
@@ -25,10 +30,8 @@ pub async fn round_one(
     propagation_db: Arc<DashMap<String, PeerId>>,
     mut rx: tokio::sync::broadcast::Receiver<()>,
     peer_msg: tokio::sync::broadcast::Sender<(TopicHash, Vec<u8>)>,
-    message: gossipsub::Message,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // get generation id
-    let generation_id = String::from_utf8(message.data)?;
+    generation_id: String,
+) -> Result<()> {
     eprintln!("New Generation: {}", generation_id);
 
     // send GET_ID message
@@ -77,7 +80,9 @@ pub async fn round_one(
     // send the round 1 package to the other participants for use in round 2
     let send_message = (generation_id, participant_id, round1_package);
     let send_message = bincode::serialize(&send_message)?;
-    let _ = peer_msg.send((TopicHash::from_raw("GEN_R2"), send_message));
+    let send_message = b64.encode(send_message);
+    let _ =
+        peer_msg.send((TopicHash::from_raw("GENERATION"), format!("GEN_R2 {}", send_message).as_bytes().to_vec()));
 
     // finished round 1
     return Ok(());
@@ -89,10 +94,10 @@ pub async fn round_two(
     r2_secret_db: Arc<DashMap<String, dkg::round2::SecretPackage>>,
     counter_db: Arc<DashMap<String, u16>>,
     peer_msg: tokio::sync::broadcast::Sender<(TopicHash, Vec<u8>)>,
-    message: gossipsub::Message,
-) -> Result<(), Box<dyn std::error::Error>> {
+    message: Vec<u8>,
+) -> Result<()> {
     // get data from message
-    let data = bincode::deserialize::<(String, u16, dkg::round1::Package)>(&message.data)?;
+    let data = bincode::deserialize::<(String, u16, dkg::round1::Package)>(&message)?;
     let generation_id = data.0;
     let participant_id = data.1;
     let round1_package = data.2;
@@ -136,7 +141,11 @@ pub async fn round_two(
     // generation
     let send_message = (generation_id, local_participant_identifier, round2_packages);
     let send_message = bincode::serialize(&send_message)?;
-    let _ = peer_msg.send((TopicHash::from_raw("GEN_FINAL"), send_message));
+    let send_message = b64.encode(send_message);
+    let _ =
+        peer_msg.send(
+            (TopicHash::from_raw("GENERATION"), format!("GEN_FINAL {}", send_message).as_bytes().to_vec()),
+        );
 
     // finished round 2
     return Ok(());
@@ -153,10 +162,10 @@ pub async fn round_three(
     generation_topic_db: Arc<DashMap<String, String>>,
     subscribe_tx: tokio::sync::broadcast::Sender<gossipsub::IdentTopic>,
     peer_msg: tokio::sync::broadcast::Sender<(TopicHash, Vec<u8>)>,
-    message: gossipsub::Message,
-) -> Result<(), Box<dyn std::error::Error>> {
+    message: Vec<u8>,
+) -> Result<()> {
     // get data from message
-    let data = bincode::deserialize::<(String, Identifier, HashMap<Identifier, dkg::round2::Package>)>(&message.data)?;
+    let data = bincode::deserialize::<(String, Identifier, HashMap<Identifier, dkg::round2::Package>)>(&message)?;
     let generation_id = data.0;
     let participant_identifier = data.1;
     let round2_packages = data.2;

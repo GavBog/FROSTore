@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use base64::{
+    engine::general_purpose::STANDARD as b64,
+    Engine,
+};
 use dashmap::DashMap;
 use data_encoding::BASE32_NOPAD;
 use libp2p::{
@@ -9,10 +12,7 @@ use sha3::{
     Digest,
     Sha3_256,
 };
-use base64::{
-    engine::general_purpose::STANDARD as b64,
-    Engine,
-};
+use std::sync::Arc;
 
 pub fn onion_address(pubkey: Vec<u8>) -> String {
     let version = vec![0x03];

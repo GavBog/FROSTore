@@ -1,4 +1,5 @@
 use crate::settings::MIN_SIGNERS;
+use anyhow::Result;
 use base64::{
     engine::general_purpose::STANDARD as b64,
     Engine,
@@ -33,7 +34,7 @@ pub async fn round_one(
     peer_msg: tokio::sync::broadcast::Sender<(TopicHash, Vec<u8>)>,
     topic: TopicHash,
     message: Vec<u8>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     // get data from message
     let data = bincode::deserialize::<(String, &str, &str)>(&message)?;
     let signing_id = data.0;
@@ -75,7 +76,7 @@ pub async fn round_one(
     let send_message = bincode::serialize(&send_message)?;
     let send_message = b64.encode(send_message);
     let send_message = format!("SIGN_R2 {}", send_message).as_bytes().to_vec();
-    let _ = peer_msg.send((TopicHash::from_raw(topic.as_str()), send_message));
+    let _ = peer_msg.send((topic, send_message));
     return Ok(());
 }
 
@@ -88,7 +89,7 @@ pub async fn round_two(
     peer_msg: tokio::sync::broadcast::Sender<(TopicHash, Vec<u8>)>,
     topic: TopicHash,
     message: Vec<u8>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     // get data from message
     let data = bincode::deserialize::<(String, &str, round1::SigningCommitments, Identifier, String)>(&message)?;
 
@@ -146,7 +147,7 @@ pub async fn round_two(
     let send_message = bincode::serialize(&send_message)?;
     let send_message = b64.encode(send_message);
     let send_message = format!("SIGN_FINAL {}", send_message).as_bytes().to_vec();
-    let _ = peer_msg.send((TopicHash::from_raw(topic.as_str()), send_message));
+    let _ = peer_msg.send((topic, send_message));
     return Ok(());
 }
 
@@ -156,7 +157,7 @@ pub async fn round_three(
     propagation_db: Arc<DashMap<String, PeerId>>,
     peer_msg: tokio::sync::broadcast::Sender<(TopicHash, Vec<u8>)>,
     message: Vec<u8>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     // get data from message
     let data =
         bincode::deserialize::<(String, &str, SigningPackage, round2::SignatureShare, Identifier, String)>(
@@ -187,9 +188,7 @@ pub async fn round_three(
 
     // do the crypto stuff
     let final_signature = (match frost::aggregate(&signing_package, &signatures, &pubkey_package) {
-        Ok(final_signature) => {
-            Ok(final_signature)
-        },
+        Ok(final_signature) => Ok(final_signature),
         Err(frost::Error::InvalidSignatureShare { culprit }) => {
             eprintln!("Removing invalid signature share {:?}", culprit);
             signatures.remove(&culprit);
@@ -208,9 +207,7 @@ pub async fn round_three(
                 }
             }
         },
-        Err(e) => {
-            return Err(Box::try_from(e)?);
-        },
+        Err(e) => Err(e),
     })?;
 
     // print out the final signature
