@@ -17,6 +17,7 @@ use libp2p::gossipsub::{
     TopicHash,
 };
 use libp2p::PeerId;
+use std::collections::BTreeMap;
 use std::{
     collections::HashMap,
     sync::Arc,
@@ -127,6 +128,9 @@ pub async fn round_two(
     // get r1 secret
     let r1_secret_package = r1_secret_db.get(generation_id.as_str()).unwrap().clone();
 
+    // convert r1_process_db to bTreeMap
+    let r1_process_db = r1_process_db.clone().into_iter().collect::<BTreeMap<_, _>>();
+
     // do the crypto stuff
     let (round2_secret_package, round2_packages) = dkg::part2(r1_secret_package, &r1_process_db)?;
 
@@ -210,13 +214,17 @@ pub async fn round_three(
     // get r2 packages
     let r2_packages = r2_process_db.get(&local_participant_identifier).unwrap().clone();
 
+    // convert packages to bTreeMap
+    let round1_packages = round1_packages.clone().into_iter().collect::<BTreeMap<_, _>>();
+    let r2_packages = r2_packages.clone().into_iter().collect::<BTreeMap<_, _>>();
+
     // do the crypto stuff
     let (key_package, pubkey_package) = dkg::part3(&round2_secret_package, &round1_packages, &r2_packages)?;
     key_db.insert(generation_id.clone(), key_package);
     pubkey_db.insert(generation_id.clone(), pubkey_package.clone());
 
     // send the onion address to the requester
-    let onion = onion_address(pubkey_package.group_public().serialize().to_vec());
+    let onion = onion_address(pubkey_package.verifying_key().serialize().to_vec());
     println!("Generated Onion Address: {}.onion", onion);
     let propagation_source = propagation_db.get(generation_id.as_str()).unwrap().to_string();
     let msg =

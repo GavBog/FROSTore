@@ -9,6 +9,7 @@ use frostore::{
     sign,
 };
 use futures::StreamExt;
+use libp2p::Swarm;
 use libp2p::{
     core::transport::upgrade::Version,
     gossipsub::{
@@ -19,15 +20,15 @@ use libp2p::{
     identity,
     kad::{
         store::MemoryStore,
-        Kademlia,
-        KademliaConfig,
-        KademliaEvent,
+        Behaviour as Kademlia,
+        Config as KademliaConfig,
+        Event as KademliaEvent,
         Mode,
     },
     noise,
     swarm::{
+        Config as SwarmConfig,
         NetworkBehaviour,
-        SwarmBuilder,
         SwarmEvent,
     },
     tcp,
@@ -106,17 +107,21 @@ async fn main() {
     }
 
     // create peer identity
-    let identify = identify::Behaviour::new(identify::Config::new("FrostStore/0.1.0".to_string(), KEYS.public()));
+    let identify = identify::Behaviour::new(identify::Config::new("FROSTore/0.1.0".to_string(), KEYS.public()));
 
     // create kademlia DHT
     let kad = Kademlia::with_config(*PEER_ID, MemoryStore::new(*PEER_ID), KademliaConfig::default());
 
-    // create swarm
-    let mut swarm = SwarmBuilder::with_tokio_executor(transport, MyBehaviour {
+    // create behaviour
+    let behaviour = MyBehaviour {
         gossipsub,
         identify,
         kad,
-    }, *PEER_ID).idle_connection_timeout(Duration::from_secs(5)).build();
+    };
+
+    // create swarm
+    let swarm_config = SwarmConfig::with_tokio_executor().with_idle_connection_timeout(Duration::from_secs(5));
+    let mut swarm = Swarm::new(transport, behaviour, *PEER_ID, swarm_config);
 
     // create databases
     let r1_secret_db = Arc::new(DashMap::new());

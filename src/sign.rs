@@ -44,7 +44,7 @@ pub async fn round_one(
 
     // get key package and secret share
     let key_package = key_db.get(&generation_id).unwrap().clone();
-    let share = key_package.secret_share();
+    let share = key_package.signing_share();
 
     // do the crypto stuff
     let mut rng = rand::thread_rng();
@@ -186,6 +186,9 @@ pub async fn round_three(
     // get pubkey package
     let pubkey_package = pubkey_db.get(generation_id).unwrap().clone();
 
+    // convert signatures to BTreeMap
+    let mut signatures = signatures.clone().into_iter().collect::<BTreeMap<_, _>>();
+
     // do the crypto stuff
     let final_signature = (match frost::aggregate(&signing_package, &signatures, &pubkey_package) {
         Ok(final_signature) => Ok(final_signature),
@@ -214,7 +217,7 @@ pub async fn round_three(
     eprintln!("Final Signature: {:?}", final_signature);
 
     // verify the signature
-    let signature_valid = pubkey_package.group_public().verify(message.as_bytes(), &final_signature).is_ok();
+    let signature_valid = pubkey_package.verifying_key().verify(message.as_bytes(), &final_signature).is_ok();
     eprintln!("Signature Valid: {}", signature_valid);
     let propagation_source = propagation_db.get(generation_id).unwrap().to_string();
     let msg = (TopicHash::from_raw(propagation_source), format!("PRINT {:?}", final_signature).as_bytes().to_vec());
