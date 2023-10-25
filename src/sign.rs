@@ -6,41 +6,47 @@ use base64::{
 };
 use dashmap::DashMap;
 use frost::{
+    keys::KeyPackage,
+    round1,
     round2,
+    Identifier,
     SigningPackage,
 };
 use frost_ed25519 as frost;
-use frost_ed25519::{
-    keys::KeyPackage,
-    round1,
-    Identifier,
+use libp2p::{
+    gossipsub::TopicHash,
+    PeerId,
 };
-use libp2p::gossipsub::TopicHash;
-use libp2p::PeerId;
-use std::collections::BTreeMap;
 use std::{
-    collections::HashMap,
+    collections::{
+        BTreeMap,
+        HashMap,
+    },
     sync::Arc,
 };
 
+#[allow(clippy::too_many_arguments)]
 pub async fn round_one(
-    key_db: Arc<DashMap<String, KeyPackage>>,
-    generation_topic_db: Arc<DashMap<String, String>>,
-    counter_db: Arc<DashMap<String, u16>>,
-    nonces_db: Arc<DashMap<String, round1::SigningNonces>>,
     commitments_db: Arc<DashMap<String, HashMap<Identifier, round1::SigningCommitments>>>,
-    propagation_source: PeerId,
-    propagation_db: Arc<DashMap<String, PeerId>>,
-    peer_msg: tokio::sync::broadcast::Sender<(TopicHash, Vec<u8>)>,
-    topic: TopicHash,
+    counter_db: Arc<DashMap<String, u16>>,
+    key_db: Arc<DashMap<String, KeyPackage>>,
     message: Vec<u8>,
+    nonces_db: Arc<DashMap<String, round1::SigningNonces>>,
+    peer_msg: tokio::sync::broadcast::Sender<(TopicHash, Vec<u8>)>,
+    propagation_db: Arc<DashMap<String, PeerId>>,
+    propagation_source: PeerId,
+    signing_topic_db: Arc<DashMap<String, String>>,
+    topic: TopicHash,
 ) -> Result<()> {
     // get data from message
     let data = bincode::deserialize::<(String, &str, &str)>(&message)?;
     let signing_id = data.0;
     let onion = data.1;
     let message = data.2;
-    let generation_id = generation_topic_db.get(onion).unwrap().clone();
+    let generation_id = signing_topic_db.get(onion).unwrap().clone();
+
+    // add propagation source to db
+    propagation_db.insert(signing_id.clone(), propagation_source);
 
     // get key package and secret share
     let key_package = key_db.get(&generation_id).unwrap().clone();
@@ -66,10 +72,7 @@ pub async fn round_one(
     let mut process_commitments_db = commitments_db.get_mut(&signing_id).unwrap();
 
     // add commitments to process commitments db
-    process_commitments_db.insert(local_participant_identifier, commitments.clone());
-
-    // add propagation source to db
-    propagation_db.insert(signing_id.clone(), propagation_source.clone());
+    process_commitments_db.insert(local_participant_identifier, commitments);
 
     // send the commitments to the other participants for use in round 2
     let send_message = (signing_id, generation_id, commitments, local_participant_identifier, message);
@@ -77,18 +80,19 @@ pub async fn round_one(
     let send_message = b64.encode(send_message);
     let send_message = format!("SIGN_R2 {}", send_message).as_bytes().to_vec();
     let _ = peer_msg.send((topic, send_message));
-    return Ok(());
+    Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn round_two(
-    key_db: Arc<DashMap<String, KeyPackage>>,
-    counter_db: Arc<DashMap<String, u16>>,
-    nonces_db: Arc<DashMap<String, round1::SigningNonces>>,
     commitments_db: Arc<DashMap<String, HashMap<Identifier, round1::SigningCommitments>>>,
-    signature_db: Arc<DashMap<String, HashMap<Identifier, round2::SignatureShare>>>,
-    peer_msg: tokio::sync::broadcast::Sender<(TopicHash, Vec<u8>)>,
-    topic: TopicHash,
+    counter_db: Arc<DashMap<String, u16>>,
+    key_db: Arc<DashMap<String, KeyPackage>>,
     message: Vec<u8>,
+    nonces_db: Arc<DashMap<String, round1::SigningNonces>>,
+    peer_msg: tokio::sync::broadcast::Sender<(TopicHash, Vec<u8>)>,
+    signature_db: Arc<DashMap<String, HashMap<Identifier, round2::SignatureShare>>>,
+    topic: TopicHash,
 ) -> Result<()> {
     // get data from message
     let data = bincode::deserialize::<(String, &str, round1::SigningCommitments, Identifier, String)>(&message)?;
@@ -100,6 +104,11 @@ pub async fn round_two(
     let participant_identifier = data.3;
     let message = data.4;
 
+    // create commitments db if it doesn't exist
+    if !commitments_db.contains_key(&signing_id) {
+        commitments_db.insert(signing_id.clone(), HashMap::new());
+    }
+
     // get process commitments db
     let mut process_commitments_db = commitments_db.get_mut(&signing_id).unwrap();
 
@@ -107,14 +116,14 @@ pub async fn round_two(
     process_commitments_db.insert(participant_identifier, commitments);
 
     // if we don't have enough participants, skip
-    if process_commitments_db.len() <= MIN_SIGNERS.clone().into() {
+    if process_commitments_db.len() <= (*MIN_SIGNERS).into() {
         return Ok(());
     }
 
     // convert commitments to BTreeMap
     let mut signing_commitments = BTreeMap::new();
     for (participant_identifier, commitments) in process_commitments_db.iter() {
-        signing_commitments.insert(*participant_identifier, commitments.clone());
+        signing_commitments.insert(*participant_identifier, *commitments);
     }
 
     // get nonces and key package
@@ -140,7 +149,7 @@ pub async fn round_two(
     let mut signatures = signature_db.get_mut(&signing_id).unwrap();
 
     // add signature to signature db
-    signatures.insert(local_participant_identifier, signature.clone());
+    signatures.insert(local_participant_identifier, signature);
 
     // send the signature to the other participants for use in the final generation
     let send_message = (signing_id, generation_id, signing_package, signature, local_participant_identifier, message);
@@ -148,15 +157,15 @@ pub async fn round_two(
     let send_message = b64.encode(send_message);
     let send_message = format!("SIGN_FINAL {}", send_message).as_bytes().to_vec();
     let _ = peer_msg.send((topic, send_message));
-    return Ok(());
+    Ok(())
 }
 
 pub async fn round_three(
-    signature_db: Arc<DashMap<String, HashMap<Identifier, round2::SignatureShare>>>,
-    pubkey_db: Arc<DashMap<String, frost::keys::PublicKeyPackage>>,
-    propagation_db: Arc<DashMap<String, PeerId>>,
-    peer_msg: tokio::sync::broadcast::Sender<(TopicHash, Vec<u8>)>,
+    direct_peer_msg: tokio::sync::broadcast::Sender<(PeerId, Vec<u8>)>,
     message: Vec<u8>,
+    propagation_db: Arc<DashMap<String, PeerId>>,
+    pubkey_db: Arc<DashMap<String, frost::keys::PublicKeyPackage>>,
+    signature_db: Arc<DashMap<String, HashMap<Identifier, round2::SignatureShare>>>,
 ) -> Result<()> {
     // get data from message
     let data =
@@ -170,6 +179,11 @@ pub async fn round_three(
     let participant_identifier = data.4;
     let message = data.5;
 
+    // create signature_db if it doesnt exist
+    if !signature_db.contains_key(&signing_id) {
+        signature_db.insert(signing_id.clone(), HashMap::new());
+    }
+
     // get signature db
     let mut signatures = signature_db.get_mut(&signing_id).unwrap();
 
@@ -177,7 +191,7 @@ pub async fn round_three(
     signatures.insert(participant_identifier, signature);
 
     // if we don't have enough participants, skip
-    if signatures.len() <= MIN_SIGNERS.clone().into() {
+    if signatures.len() <= (*MIN_SIGNERS).into() {
         eprintln!("Not enough signatures yet!");
         return Ok(());
     }
@@ -219,8 +233,12 @@ pub async fn round_three(
     // verify the signature
     let signature_valid = pubkey_package.verifying_key().verify(message.as_bytes(), &final_signature).is_ok();
     eprintln!("Signature Valid: {}", signature_valid);
+
+    // send the signature to the original sender
     let propagation_source = propagation_db.get(generation_id).unwrap().to_string();
-    let msg = (TopicHash::from_raw(propagation_source), format!("PRINT {:?}", final_signature).as_bytes().to_vec());
-    let _ = peer_msg.send(msg);
-    return Ok(());
+    let _ =
+        direct_peer_msg.send(
+            (propagation_source.parse()?, format!("PRINT {:?}", final_signature).as_bytes().to_vec()),
+        );
+    Ok(())
 }
