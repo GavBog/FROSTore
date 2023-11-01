@@ -3,6 +3,12 @@ use base64::{
     Engine,
 };
 use dashmap::DashMap;
+use frost_ed25519::{
+    round1::SigningCommitments,
+    Identifier,
+    SigningPackage,
+};
+use frostore::settings::MIN_SIGNERS;
 use frostore::{
     gen,
     input,
@@ -13,6 +19,7 @@ use futures::StreamExt;
 use libp2p::{
     core::transport::upgrade::Version,
     gossipsub,
+    gossipsub::TopicHash,
     identify,
     identity,
     kad::{
@@ -35,18 +42,19 @@ use libp2p::{
     },
     tcp,
     yamux,
-    Multiaddr,
     PeerId,
     Swarm,
     Transport,
 };
 use once_cell::sync::Lazy;
-use std::collections::HashMap;
+use std::collections::{
+    BTreeMap,
+    HashMap,
+};
 use std::{
     sync::Arc,
     time::Duration,
 };
-use tokio::sync::RwLock;
 use tokio::{
     io::AsyncBufReadExt,
     select,
@@ -143,10 +151,10 @@ async fn main() {
     let mut swarm = Swarm::new(transport, behaviour, *PEER_ID, swarm_config);
 
     // create databases
-    let commitments_db = Arc::new(DashMap::new());
     let counter_db = Arc::new(DashMap::new());
+    let generation_id_db = Arc::new(DashMap::new());
     let key_db = Arc::new(DashMap::new());
-    let listener_vec = Arc::new(RwLock::new(Vec::new()));
+    let mut commitments_db = HashMap::new();
     let mut subscribed_db = HashMap::new();
     let nonces_db = Arc::new(DashMap::new());
     let propagation_db = Arc::new(DashMap::new());
@@ -156,6 +164,8 @@ async fn main() {
     let r2_db = Arc::new(DashMap::new());
     let r2_secret_db = Arc::new(DashMap::new());
     let signature_db = Arc::new(DashMap::new());
+    let signing_message_db = Arc::new(DashMap::new());
+    let signing_package_db = Arc::new(DashMap::new());
     let signing_topic_db = Arc::new(DashMap::new());
 
     // create channel
@@ -182,37 +192,47 @@ async fn main() {
         select!{
             line = stdin.next_line() => {
                 if let Some(line) = line.expect("line exists") {
-                    let mut args = line.split(' ');
-                    match args.next().unwrap_or_default() {
+                    let mut args = line.split(' ').map(|s| s.to_string()).collect::<Vec<String>>();
+                    match args.remove(0).as_str() {
                         "ADD_PEER" => {
                             let kademlia = &mut swarm.behaviour_mut().kad;
-                            input::add_peer(args, kademlia).await;
+                            input::add_peer(args, kademlia).await.unwrap_or_else(|e| {
+                                eprintln!("Error: {}", e);
+                            });
                         },
                         "GENERATE" => {
                             let closest_peer_rx = closest_peer_tx.subscribe();
                             let direct_peer_msg = direct_peer_msg.clone();
-                            let listener_vec = listener_vec.clone();
                             let peer_id = id_string.clone();
                             let peer_msg = peer_msg.clone();
                             let query_id = swarm.behaviour_mut().kad.get_closest_peers(PeerId::random());
                             let subscribe_tx = subscribe_tx.clone();
                             let subscribed_rx = subscribed_tx.subscribe();
                             tokio::spawn(async move {
-                                let _ =
-                                    input::generate(
-                                        direct_peer_msg,
-                                        listener_vec,
-                                        closest_peer_rx,
-                                        subscribed_rx,
-                                        peer_id,
-                                        peer_msg,
-                                        query_id,
-                                        subscribe_tx,
-                                    ).await;
+                                input::generate(
+                                    direct_peer_msg,
+                                    closest_peer_rx,
+                                    subscribed_rx,
+                                    peer_id,
+                                    peer_msg,
+                                    query_id,
+                                    subscribe_tx,
+                                )
+                                    .await
+                                    .unwrap_or_else(|e| {
+                                        eprintln!("Error: {}", e);
+                                    });
                             });
                         },
                         "SIGN" => {
-                            input::sign(args, peer_msg.clone()).await;
+                            let args = args.clone();
+                            let peer_msg = peer_msg.clone();
+                            let signing_message_db = signing_message_db.clone();
+                            tokio::spawn(async move {
+                                input::sign(args, peer_msg, signing_message_db).await.unwrap_or_else(|e| {
+                                    eprintln!("Error: {}", e);
+                                });
+                            });
                         },
                         _ => { },
                     }
@@ -236,7 +256,6 @@ async fn main() {
                     Some(SwarmEvent::NewListenAddr { address, .. }) => {
                         eprintln!("Listening on {}", address);
                         eprintln!("ADD_PEER {} {}", id_string, address);
-                        listener_vec.write().await.push(address);
                     },
                     Some(SwarmEvent::ConnectionEstablished { peer_id, .. }) => {
                         eprintln!("Connected to {}", peer_id);
@@ -267,20 +286,12 @@ async fn main() {
                                     "JOIN_GEN" => {
                                         // get data from message
                                         let data = b64.decode(&args[1]).unwrap();
-                                        let data =
-                                            bincode::deserialize::<(String, String, u16, Vec<Multiaddr>)>(
-                                                &data,
-                                            ).unwrap();
+                                        let data = bincode::deserialize::<(String, String, u16)>(&data).unwrap();
                                         let topic = data.0;
                                         let peer_id = data.1.parse().unwrap();
 
                                         // insert peer id into propagation database
                                         propagation_db.insert(topic.clone(), peer_id);
-
-                                        // add peer to kademlia DHT
-                                        for addr in data.3 {
-                                            swarm.behaviour_mut().kad.add_address(&peer_id, addr);
-                                        }
 
                                         // insert count in database
                                         let participant_id = data.2;
@@ -291,6 +302,46 @@ async fn main() {
                                     "PRINT" => {
                                         let message = args[1..].join(" ");
                                         println!("{}", message);
+                                    },
+                                    "SIGNING_PACKAGE" => {
+                                        eprintln!("Signing package received");
+                                        let data = b64.decode(args[1].as_str()).unwrap();
+                                        let data =
+                                            bincode::deserialize::<(String, String, SigningCommitments, Identifier)>(
+                                                &data,
+                                            ).unwrap();
+                                        let topic = data.0;
+                                        let signing_id = data.1;
+                                        let commitments = data.2;
+                                        let participant_identifier = data.3;
+
+                                        // insert commitment into database
+                                        if !commitments_db.contains_key(&signing_id) {
+                                            let _ = commitments_db.insert(signing_id.clone(), HashMap::new());
+                                        }
+                                        let process_db = commitments_db.get_mut(&signing_id).unwrap();
+                                        process_db.insert(participant_identifier, commitments);
+                                        println!("DB LENGTH: {}", process_db.len());
+                                        if process_db.len() <= (*MIN_SIGNERS).into() {
+                                            continue;
+                                        }
+
+                                        // get message from signing_message_db
+                                        let message = signing_message_db.get(&signing_id).unwrap().clone();
+
+                                        // create signing_package
+                                        let process_db = process_db.clone().into_iter().collect::<BTreeMap<_, _>>();
+                                        let signing_package = SigningPackage::new(process_db, message.as_ref());
+
+                                        // convert topic into TopicHash
+                                        let topic = TopicHash::from_raw(&topic);
+
+                                        // send SIGN_R2 message
+                                        let send_message = (signing_id, signing_package);
+                                        let send_message = bincode::serialize(&send_message).unwrap();
+                                        let send_message = b64.encode(send_message);
+                                        let send_message = format!("SIGN_R2 {}", send_message).as_bytes().to_vec();
+                                        let _ = peer_msg.send((topic, send_message));
                                     },
                                     _ => {
                                         eprintln!("Request response request: {:?}", request);
@@ -418,23 +469,25 @@ async fn main() {
                                             // Signing Round 1
                                             "SIGN_R1" => {
                                                 eprintln!("Signing round 1");
-                                                let commitments_db = commitments_db.clone();
                                                 let counter_db = counter_db.clone();
+                                                let direct_peer_msg = direct_peer_msg.clone();
+                                                let generation_id_db = generation_id_db.clone();
                                                 let key_db = key_db.clone();
                                                 let nonces_db = nonces_db.clone();
-                                                let peer_msg = peer_msg.clone();
                                                 let propagation_db = propagation_db.clone();
+                                                let signing_message_db = signing_message_db.clone();
                                                 let signing_topic_db = signing_topic_db.clone();
                                                 tokio::spawn(async move {
                                                     sign::round_one(
-                                                        commitments_db,
                                                         counter_db,
+                                                        direct_peer_msg,
+                                                        generation_id_db,
                                                         key_db,
                                                         message,
                                                         nonces_db,
-                                                        peer_msg,
                                                         propagation_db,
                                                         propagation_source,
+                                                        signing_message_db,
                                                         signing_topic_db,
                                                         topic,
                                                     )
@@ -447,21 +500,23 @@ async fn main() {
                                             // Signing Round 2
                                             "SIGN_R2" => {
                                                 eprintln!("Signing round 2");
-                                                let commitments_db = commitments_db.clone();
                                                 let counter_db = counter_db.clone();
+                                                let generation_id_db = generation_id_db.clone();
                                                 let key_db = key_db.clone();
                                                 let nonces_db = nonces_db.clone();
                                                 let peer_msg = peer_msg.clone();
                                                 let signature_db = signature_db.clone();
+                                                let signing_package_db = signing_package_db.clone();
                                                 tokio::spawn(async move {
                                                     sign::round_two(
-                                                        commitments_db,
                                                         counter_db,
+                                                        generation_id_db,
                                                         key_db,
                                                         message,
                                                         nonces_db,
                                                         peer_msg,
                                                         signature_db,
+                                                        signing_package_db,
                                                         topic,
                                                     )
                                                         .await
@@ -474,16 +529,22 @@ async fn main() {
                                             "SIGN_FINAL" => {
                                                 eprintln!("Signing final");
                                                 let direct_peer_msg = direct_peer_msg.clone();
+                                                let generation_id_db = generation_id_db.clone();
                                                 let propagation_db = propagation_db.clone();
                                                 let pubkey_db = pubkey_db.clone();
                                                 let signature_db = signature_db.clone();
+                                                let signing_message_db = signing_message_db.clone();
+                                                let signing_package_db = signing_package_db.clone();
                                                 tokio::spawn(async move {
-                                                    sign::round_three(
+                                                    sign::round_final(
                                                         direct_peer_msg,
+                                                        generation_id_db,
                                                         message,
                                                         propagation_db,
                                                         pubkey_db,
                                                         signature_db,
+                                                        signing_message_db,
+                                                        signing_package_db,
                                                     )
                                                         .await
                                                         .unwrap_or_else(|e| {

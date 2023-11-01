@@ -123,7 +123,7 @@ pub async fn round_two(
     }
 
     // get r1 secret
-    let r1_secret_package = r1_secret_db.get(generation_id.as_str()).unwrap().clone();
+    let r1_secret_package = r1_secret_db.remove(generation_id.as_str()).unwrap().1;
 
     // convert r1_process_db to bTreeMap
     let r1_process_db = r1_process_db.clone().into_iter().collect::<BTreeMap<_, _>>();
@@ -189,10 +189,7 @@ pub async fn round_final(
 
     // add round 2 packages to process db
     for (receiver_identifier, round2_package) in round2_packages {
-        r2_process_db
-            .entry(receiver_identifier)
-            .or_default()
-            .insert(participant_identifier, round2_package);
+        r2_process_db.entry(receiver_identifier).or_default().insert(participant_identifier, round2_package);
     }
 
     // if we don't have enough participants, skip
@@ -222,13 +219,14 @@ pub async fn round_final(
     }
 
     // get r2 secret
-    let round2_secret_package = r2_secret_db.get(generation_id.as_str()).unwrap().clone();
+    let round2_secret_package = r2_secret_db.remove(generation_id.as_str()).unwrap().1;
 
     // get r1 packages
-    let r1_process_db = r1_db.get_mut(generation_id.as_str()).unwrap();
-    let round1_packages = r1_process_db.clone();
+    let round1_packages = r1_db.remove(generation_id.as_str()).unwrap().1;
 
     // get r2 packages
+    drop(r2_process_db);
+    let r2_process_db = r2_db.remove(generation_id.as_str()).unwrap().1;
     let r2_packages = r2_process_db.get(&local_participant_identifier).unwrap().clone();
 
     // convert packages to bTreeMap
@@ -245,11 +243,8 @@ pub async fn round_final(
     // send the onion address to the requester
     let onion = onion_address(pubkey_package.verifying_key().serialize().to_vec());
     eprintln!("Generated Onion Address: {}.onion", onion);
-    let propagation_source = propagation_db.get(generation_id.as_str()).unwrap().to_string();
-    let _ =
-        direct_peer_msg.send(
-            (propagation_source.parse().unwrap(), format!("GENERATED {}", onion).as_bytes().to_vec()),
-        );
+    let propagation_source = propagation_db.remove(generation_id.as_str()).unwrap().1;
+    let _ = direct_peer_msg.send((propagation_source, format!("GENERATED {}", onion).as_bytes().to_vec()));
 
     // subscribe to the generation topic
     let _ = subscribe_tx.send(gossipsub::IdentTopic::new(onion.clone()));
