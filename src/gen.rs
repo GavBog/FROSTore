@@ -244,7 +244,7 @@ pub async fn round_final(
     let onion = onion_address(pubkey_package.verifying_key().serialize().to_vec());
     eprintln!("Generated Onion Address: {}.onion", onion);
     let propagation_source = propagation_db.remove(generation_id.as_str()).unwrap().1;
-    let _ = direct_peer_msg.send((propagation_source, format!("GENERATED {}", onion).as_bytes().to_vec()));
+    let _ = direct_peer_msg.send((propagation_source, format!("PRINT {}", onion).as_bytes().to_vec()));
 
     // subscribe to the generation topic
     let _ = subscribe_tx.send(gossipsub::IdentTopic::new(onion.clone()));

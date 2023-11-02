@@ -277,11 +277,6 @@ async fn main() {
                                 let args = data.split(' ').map(|s| s.to_string()).collect::<Vec<String>>();
                                 let req_type = args[0].as_str();
                                 match req_type {
-                                    // print message
-                                    "GENERATED" => {
-                                        println!("Generated Onion Address: {}.onion", args[1]);
-                                        let _ = subscribe_tx.send(gossipsub::IdentTopic::new(args[1].clone()));
-                                    },
                                     // Join Generation Gossipsub Topic
                                     "JOIN_GEN" => {
                                         // get data from message
@@ -299,6 +294,7 @@ async fn main() {
                                         let topic = gossipsub::IdentTopic::new(topic);
                                         let _ = subscribe_tx.send(topic);
                                     },
+                                    // print message
                                     "PRINT" => {
                                         let message = args[1..].join(" ");
                                         println!("{}", message);
@@ -369,6 +365,7 @@ async fn main() {
                                             // Key Generation Round 1
                                             "GEN_R1" => {
                                                 eprintln!("Generating round 1");
+                                                let _ = swarm.behaviour_mut().kad.bootstrap();
                                                 let counter_db = counter_db.clone();
                                                 let peer_msg = peer_msg.clone();
                                                 let r1_secret_db = r1_secret_db.clone();

@@ -96,7 +96,11 @@ pub async fn round_two(
 
     // get data from message
     let signing_id = data.0;
-    let generation_id = generation_id_db.get(&signing_id).unwrap().clone();
+    let generation_id = if let Some(generation_id) = generation_id_db.get(&signing_id) {
+        generation_id.clone()
+    } else {
+        return Ok(());
+    };
     let signing_package = data.1;
 
     // add signing package to db
@@ -153,13 +157,21 @@ pub async fn round_final(
     // get data from message
     let data = bincode::deserialize::<(String, round2::SignatureShare, Identifier)>(&message)?;
     let signing_id = data.0;
-    let generation_id = generation_id_db.get(&signing_id).unwrap().clone();
+    let generation_id = if let Some(generation_id) = generation_id_db.get(&signing_id) {
+        generation_id.clone()
+    } else {
+        return Ok(());
+    };
     let signature = data.1;
     let participant_identifier = data.2;
     let message = signing_message_db.get(&signing_id).unwrap().clone();
 
     // get signing package
-    let signing_package = signing_package_db.get(&signing_id).unwrap().clone();
+    let signing_package = if let Some(signing_package) = signing_package_db.get(&signing_id) {
+        signing_package.clone()
+    } else {
+        return Ok(());
+    };
 
     // create signature_db if it doesnt exist
     if !signature_db.contains_key(&signing_id) {
