@@ -4,11 +4,12 @@ use base64::{
 };
 use dashmap::DashMap;
 use frost_ed25519::{
+    keys::dkg,
     round1::SigningCommitments,
+    round2,
     Identifier,
     SigningPackage,
 };
-use frostore::settings::MIN_SIGNERS;
 use frostore::{
     gen,
     input,
@@ -16,6 +17,7 @@ use frostore::{
     sign,
 };
 use futures::StreamExt;
+use libp2p::gossipsub::IdentTopic;
 use libp2p::{
     core::transport::upgrade::Version,
     gossipsub,
@@ -47,10 +49,7 @@ use libp2p::{
     Transport,
 };
 use once_cell::sync::Lazy;
-use std::collections::{
-    BTreeMap,
-    HashMap,
-};
+use std::collections::BTreeMap;
 use std::{
     sync::Arc,
     time::Duration,
@@ -151,31 +150,20 @@ async fn main() {
     let mut swarm = Swarm::new(transport, behaviour, *PEER_ID, swarm_config);
 
     // create databases
-    let counter_db = Arc::new(DashMap::new());
-    let generation_id_db = Arc::new(DashMap::new());
     let key_db = Arc::new(DashMap::new());
-    let mut commitments_db = HashMap::new();
-    let mut subscribed_db = HashMap::new();
-    let nonces_db = Arc::new(DashMap::new());
-    let propagation_db = Arc::new(DashMap::new());
-    let pubkey_db = Arc::new(DashMap::new());
-    let r1_db = Arc::new(DashMap::new());
-    let r1_secret_db = Arc::new(DashMap::new());
-    let r2_db = Arc::new(DashMap::new());
-    let r2_secret_db = Arc::new(DashMap::new());
-    let signature_db = Arc::new(DashMap::new());
-    let signing_message_db = Arc::new(DashMap::new());
-    let signing_package_db = Arc::new(DashMap::new());
-    let signing_topic_db = Arc::new(DashMap::new());
+    let peer_id_db = Arc::new(DashMap::new());
 
     // create channel
     let (closest_peer_tx, _) = tokio::sync::broadcast::channel(32);
-    let (direct_peer_msg, mut direct_msg_reader) = tokio::sync::broadcast::channel(32);
-    let (peer_msg, mut msg_reader) = tokio::sync::broadcast::channel(32);
-    let (r1_secret_tx, _) = tokio::sync::broadcast::channel(32);
-    let (r2_secret_tx, _) = tokio::sync::broadcast::channel(32);
-    let (subscribe_tx, mut subscribe_rx) = tokio::sync::broadcast::channel(32);
-    let (subscribed_tx, _) = tokio::sync::broadcast::channel(32);
+    let (direct_peer_msg, mut direct_msg_reader) = tokio::sync::mpsc::unbounded_channel();
+    let (peer_msg, mut msg_reader) = tokio::sync::mpsc::unbounded_channel();
+    let (r2_gen_tx, _) = tokio::sync::broadcast::channel((*MAX_SIGNERS * 32) as usize);
+    let (r2_sign_tx, _) = tokio::sync::broadcast::channel((*MAX_SIGNERS * 32) as usize);
+    let (r3_gen_tx, _) = tokio::sync::broadcast::channel((*MAX_SIGNERS * 32) as usize);
+    let (r3_sign_tx, _) = tokio::sync::broadcast::channel((*MAX_SIGNERS * 32) as usize);
+    let (signing_package_tx, _) = tokio::sync::broadcast::channel((*MAX_SIGNERS * 32) as usize);
+    let (subscribe_tx, mut subscribe_rx) = tokio::sync::broadcast::channel(*MAX_SIGNERS as usize);
+    let (subscribed_tx, _) = tokio::sync::broadcast::channel((*MAX_SIGNERS * 32) as usize);
 
     // set kademlia to server mode
     swarm.behaviour_mut().kad.set_mode(Some(Mode::Server));
@@ -203,21 +191,11 @@ async fn main() {
                         "GENERATE" => {
                             let closest_peer_rx = closest_peer_tx.subscribe();
                             let direct_peer_msg = direct_peer_msg.clone();
-                            let peer_id = id_string.clone();
                             let peer_msg = peer_msg.clone();
                             let query_id = swarm.behaviour_mut().kad.get_closest_peers(PeerId::random());
-                            let subscribe_tx = subscribe_tx.clone();
                             let subscribed_rx = subscribed_tx.subscribe();
                             tokio::spawn(async move {
-                                input::generate(
-                                    direct_peer_msg,
-                                    closest_peer_rx,
-                                    subscribed_rx,
-                                    peer_id,
-                                    peer_msg,
-                                    query_id,
-                                    subscribe_tx,
-                                )
+                                input::generate(direct_peer_msg, closest_peer_rx, subscribed_rx, peer_msg, query_id)
                                     .await
                                     .unwrap_or_else(|e| {
                                         eprintln!("Error: {}", e);
@@ -226,10 +204,10 @@ async fn main() {
                         },
                         "SIGN" => {
                             let args = args.clone();
+                            let signing_package_rx = signing_package_tx.subscribe();
                             let peer_msg = peer_msg.clone();
-                            let signing_message_db = signing_message_db.clone();
                             tokio::spawn(async move {
-                                input::sign(args, peer_msg, signing_message_db).await.unwrap_or_else(|e| {
+                                input::sign(args, signing_package_rx, peer_msg).await.unwrap_or_else(|e| {
                                     eprintln!("Error: {}", e);
                                 });
                             });
@@ -243,13 +221,13 @@ async fn main() {
                 let _ = swarm.behaviour_mut().req_res.send_request(&peer_id, message);
             },
             recv = msg_reader.recv() => {
-                let (topic_hash, message) = recv.unwrap();
-                let _ = swarm.behaviour_mut().gossipsub.publish(topic_hash, message);
+                let (topic, message) = recv.unwrap();
+                let _ = swarm.behaviour_mut().gossipsub.publish(topic, message);
             },
             recv = subscribe_rx.recv() => {
-                let topic = recv.unwrap();
+                let topic: IdentTopic = recv.unwrap();
                 let _ = swarm.behaviour_mut().gossipsub.subscribe(&topic);
-            },
+            }
             event = swarm.next() => {
                 match event {
                     // handle swarm events
@@ -278,66 +256,40 @@ async fn main() {
                                 let req_type = args[0].as_str();
                                 match req_type {
                                     // Join Generation Gossipsub Topic
-                                    "JOIN_GEN" => {
+                                    "GEN_START" => {
+                                        eprintln!("Generating round 1");
+
                                         // get data from message
                                         let data = b64.decode(&args[1]).unwrap();
-                                        let data = bincode::deserialize::<(String, String, u16)>(&data).unwrap();
-                                        let topic = data.0;
-                                        let peer_id = data.1.parse().unwrap();
+                                        let data = bincode::deserialize::<(String, u16)>(&data).unwrap();
+                                        let generation_id = data.0;
+                                        let participant_id = data.1;
 
-                                        // insert peer id into propagation database
-                                        propagation_db.insert(topic.clone(), peer_id);
+                                        // bootstrap kademlia to make sure it knows about all peers
+                                        let _ = swarm.behaviour_mut().kad.bootstrap();
 
-                                        // insert count in database
-                                        let participant_id = data.2;
-                                        counter_db.insert(topic.clone(), participant_id);
-                                        let topic = gossipsub::IdentTopic::new(topic);
-                                        let _ = subscribe_tx.send(topic);
+                                        // subscribe to the generation
+                                        let topic = gossipsub::IdentTopic::new(&generation_id);
+                                        let _ = swarm.behaviour_mut().gossipsub.subscribe(&topic);
+
+                                        // add participant id to the database
+                                        peer_id_db.insert(generation_id, participant_id);
                                     },
                                     // print message
                                     "PRINT" => {
                                         let message = args[1..].join(" ");
                                         println!("{}", message);
                                     },
+                                    // create signing package
                                     "SIGNING_PACKAGE" => {
-                                        eprintln!("Signing package received");
+                                        eprintln!("Signing package request received");
                                         let data = b64.decode(args[1].as_str()).unwrap();
                                         let data =
-                                            bincode::deserialize::<(String, String, SigningCommitments, Identifier)>(
+                                            bincode::deserialize::<(&str, Identifier, SigningCommitments)>(
                                                 &data,
                                             ).unwrap();
-                                        let topic = data.0;
-                                        let signing_id = data.1;
-                                        let commitments = data.2;
-                                        let participant_identifier = data.3;
-
-                                        // insert commitment into database
-                                        if !commitments_db.contains_key(&signing_id) {
-                                            let _ = commitments_db.insert(signing_id.clone(), HashMap::new());
-                                        }
-                                        let process_db = commitments_db.get_mut(&signing_id).unwrap();
-                                        process_db.insert(participant_identifier, commitments);
-                                        println!("DB LENGTH: {}", process_db.len());
-                                        if process_db.len() <= (*MIN_SIGNERS).into() {
-                                            continue;
-                                        }
-
-                                        // get message from signing_message_db
-                                        let message = signing_message_db.get(&signing_id).unwrap().clone();
-
-                                        // create signing_package
-                                        let process_db = process_db.clone().into_iter().collect::<BTreeMap<_, _>>();
-                                        let signing_package = SigningPackage::new(process_db, message.as_ref());
-
-                                        // convert topic into TopicHash
-                                        let topic = TopicHash::from_raw(&topic);
-
-                                        // send SIGN_R2 message
-                                        let send_message = (signing_id, signing_package);
-                                        let send_message = bincode::serialize(&send_message).unwrap();
-                                        let send_message = b64.encode(send_message);
-                                        let send_message = format!("SIGN_R2 {}", send_message).as_bytes().to_vec();
-                                        let _ = peer_msg.send((topic, send_message));
+                                        let _ =
+                                            signing_package_tx.send((TopicHash::from_raw(data.0), data.1, data.2));
                                     },
                                     _ => {
                                         eprintln!("Request response request: {:?}", request);
@@ -352,10 +304,15 @@ async fn main() {
                     // handle gossipsub events
                     Some(SwarmEvent::Behaviour(MyBehaviourEvent::Gossipsub(event))) => {
                         match event {
-                            gossipsub::Event::Message { propagation_source, message, .. } => {
+                            gossipsub::Event::Message { message, propagation_source, .. } => {
                                 match message.topic {
-                                    // handle generation messages
-                                    topic if counter_db.contains_key(topic.as_str()) => {
+                                    topic if
+                                        swarm
+                                            .behaviour_mut()
+                                            .gossipsub
+                                            .topics()
+                                            .collect::<Vec<&TopicHash>>()
+                                            .contains(&&topic) => {
                                         // get data from message
                                         let data = String::from_utf8(message.data).unwrap();
                                         let args =
@@ -364,190 +321,105 @@ async fn main() {
                                         match req_type {
                                             // Key Generation Round 1
                                             "GEN_R1" => {
-                                                eprintln!("Generating round 1");
-                                                let _ = swarm.behaviour_mut().kad.bootstrap();
-                                                let counter_db = counter_db.clone();
+                                                let direct_peer_msg = direct_peer_msg.clone();
+                                                let peer_id_db = peer_id_db.clone();
                                                 let peer_msg = peer_msg.clone();
-                                                let r1_secret_db = r1_secret_db.clone();
-                                                let r1_secret_tx = r1_secret_tx.clone();
+                                                let r2_gen_rx = r2_gen_tx.subscribe();
+                                                let r3_gen_rx = r3_gen_tx.subscribe();
+                                                let key_db = key_db.clone();
+                                                let subscribe_tx = subscribe_tx.clone();
                                                 tokio::spawn(async move {
-                                                    gen::round_one(
-                                                        counter_db,
-                                                        peer_msg,
-                                                        r1_secret_db,
-                                                        r1_secret_tx,
-                                                        topic,
-                                                    )
-                                                        .await
-                                                        .unwrap_or_else(|e| {
-                                                            eprintln!("Error: {}", e);
-                                                        });
+                                                    let response =
+                                                        gen::generator(
+                                                            key_db,
+                                                            r2_gen_rx,
+                                                            r3_gen_rx,
+                                                            peer_id_db,
+                                                            peer_msg,
+                                                            topic.clone(),
+                                                        )
+                                                            .await
+                                                            .unwrap_or_else(|e| {
+                                                                eprintln!("Error: {}", e);
+                                                                format!("Failed Generation: {}", e)
+                                                            });
+                                                    let _ =
+                                                        direct_peer_msg.send(
+                                                            (
+                                                                propagation_source,
+                                                                format!("PRINT {}", response).as_bytes().to_vec(),
+                                                            ),
+                                                        );
+                                                    let _ = subscribe_tx.send(IdentTopic::new(response));
                                                 });
                                             },
                                             // Key Generation Round 2
                                             "GEN_R2" => {
                                                 eprintln!("Generating round 2");
-                                                let counter_db = counter_db.clone();
-                                                let message = args[1].clone();
-                                                let peer_msg = peer_msg.clone();
-                                                let r1_db = r1_db.clone();
-                                                let r1_secret_db = r1_secret_db.clone();
-                                                let r1_secret_rx = r1_secret_tx.subscribe();
-                                                let r2_secret_db = r2_secret_db.clone();
-                                                let r2_secret_tx = r2_secret_tx.clone();
-                                                tokio::spawn(async move {
-                                                    gen::round_two(
-                                                        counter_db,
-                                                        message,
-                                                        r1_secret_rx,
-                                                        peer_msg,
-                                                        r1_db,
-                                                        r1_secret_db,
-                                                        r2_secret_db,
-                                                        r2_secret_tx,
-                                                        topic,
-                                                    )
-                                                        .await
-                                                        .unwrap_or_else(|e| {
-                                                            eprintln!("Error: {}", e);
-                                                        });
-                                                });
+                                                let message = b64.decode(&args[1]).unwrap();
+                                                let data =
+                                                    bincode::deserialize::<(Identifier, dkg::round1::Package)>(
+                                                        &message,
+                                                    ).unwrap();
+                                                let _ = r2_gen_tx.send((topic, data.0, data.1));
                                             },
                                             // Key Generation Round 3
                                             "GEN_FINAL" => {
                                                 eprintln!("Generating final");
-                                                let counter_db = counter_db.clone();
+                                                let message = b64.decode(&args[1]).unwrap();
+                                                let data =
+                                                    bincode
+                                                    ::deserialize::<
+                                                        (Identifier, BTreeMap<Identifier, dkg::round2::Package>),
+                                                    >(
+                                                        &message,
+                                                    ).unwrap();
+                                                let _ = r3_gen_tx.send((topic, data.0, data.1));
+                                            },
+                                            // Signing Round 1
+                                            "SIGN_R1" => {
+                                                eprintln!("Signing round 1");
+                                                let message = b64.decode(&args[1]).unwrap();
                                                 let direct_peer_msg = direct_peer_msg.clone();
                                                 let key_db = key_db.clone();
-                                                let message = args[1].clone();
-                                                let propagation_db = propagation_db.clone();
-                                                let pubkey_db = pubkey_db.clone();
-                                                let r1_db = r1_db.clone();
-                                                let r2_db = r2_db.clone();
-                                                let r2_secret_db = r2_secret_db.clone();
-                                                let r2_secret_rx = r2_secret_tx.subscribe();
-                                                let signing_topic_db = signing_topic_db.clone();
-                                                let subscribe_tx = subscribe_tx.clone();
+                                                let peer_id_db = peer_id_db.clone();
+                                                let peer_msg = peer_msg.clone();
+                                                let r2_sign_rx = r2_sign_tx.subscribe();
+                                                let r3_sign_rx = r3_sign_tx.subscribe();
                                                 tokio::spawn(async move {
-                                                    gen::round_final(
-                                                        counter_db,
+                                                    sign::signer(
                                                         direct_peer_msg,
                                                         key_db,
                                                         message,
-                                                        r2_secret_rx,
-                                                        propagation_db,
-                                                        pubkey_db,
-                                                        r1_db,
-                                                        r2_db,
-                                                        r2_secret_db,
-                                                        signing_topic_db,
-                                                        subscribe_tx,
+                                                        r2_sign_rx,
+                                                        r3_sign_rx,
+                                                        peer_id_db,
+                                                        peer_msg,
+                                                        propagation_source,
                                                         topic,
                                                     )
                                                         .await
                                                         .unwrap_or_else(|e| {
                                                             eprintln!("Error: {}", e);
                                                         });
-                                                });
-                                            },
-                                            _ => {
-                                                eprintln!("Received: {:?}", data);
-                                            },
-                                        }
-                                    },
-                                    // handle signing messages
-                                    topic if signing_topic_db.contains_key(topic.as_str()) => {
-                                        let data = String::from_utf8(message.data).unwrap();
-                                        let args =
-                                            data.split(' ').map(|s| s.to_string()).collect::<Vec<String>>();
-                                        let round = &args[0];
-                                        let message = b64.decode(&args[1]).unwrap();
-                                        match round.as_str() {
-                                            // Signing Round 1
-                                            "SIGN_R1" => {
-                                                eprintln!("Signing round 1");
-                                                let counter_db = counter_db.clone();
-                                                let direct_peer_msg = direct_peer_msg.clone();
-                                                let generation_id_db = generation_id_db.clone();
-                                                let key_db = key_db.clone();
-                                                let nonces_db = nonces_db.clone();
-                                                let propagation_db = propagation_db.clone();
-                                                let signing_message_db = signing_message_db.clone();
-                                                let signing_topic_db = signing_topic_db.clone();
-                                                tokio::spawn(async move {
-                                                    sign::round_one(
-                                                        counter_db,
-                                                        direct_peer_msg,
-                                                        generation_id_db,
-                                                        key_db,
-                                                        message,
-                                                        nonces_db,
-                                                        propagation_db,
-                                                        propagation_source,
-                                                        signing_message_db,
-                                                        signing_topic_db,
-                                                        topic,
-                                                    )
-                                                        .await
-                                                        .unwrap_or_else(|e| {
-                                                            eprintln!("Error: {}", e);
-                                                        })
                                                 });
                                             },
                                             // Signing Round 2
                                             "SIGN_R2" => {
                                                 eprintln!("Signing round 2");
-                                                let counter_db = counter_db.clone();
-                                                let generation_id_db = generation_id_db.clone();
-                                                let key_db = key_db.clone();
-                                                let nonces_db = nonces_db.clone();
-                                                let peer_msg = peer_msg.clone();
-                                                let signature_db = signature_db.clone();
-                                                let signing_package_db = signing_package_db.clone();
-                                                tokio::spawn(async move {
-                                                    sign::round_two(
-                                                        counter_db,
-                                                        generation_id_db,
-                                                        key_db,
-                                                        message,
-                                                        nonces_db,
-                                                        peer_msg,
-                                                        signature_db,
-                                                        signing_package_db,
-                                                        topic,
-                                                    )
-                                                        .await
-                                                        .unwrap_or_else(|e| {
-                                                            eprintln!("Error: {}", e);
-                                                        })
-                                                });
+                                                let data = b64.decode(&args[1]).unwrap();
+                                                let signing_package = SigningPackage::deserialize(&data).unwrap();
+                                                let _ = r2_sign_tx.send((topic, signing_package));
                                             },
                                             // Signing Round 3
                                             "SIGN_FINAL" => {
                                                 eprintln!("Signing final");
-                                                let direct_peer_msg = direct_peer_msg.clone();
-                                                let generation_id_db = generation_id_db.clone();
-                                                let propagation_db = propagation_db.clone();
-                                                let pubkey_db = pubkey_db.clone();
-                                                let signature_db = signature_db.clone();
-                                                let signing_message_db = signing_message_db.clone();
-                                                let signing_package_db = signing_package_db.clone();
-                                                tokio::spawn(async move {
-                                                    sign::round_final(
-                                                        direct_peer_msg,
-                                                        generation_id_db,
-                                                        message,
-                                                        propagation_db,
-                                                        pubkey_db,
-                                                        signature_db,
-                                                        signing_message_db,
-                                                        signing_package_db,
-                                                    )
-                                                        .await
-                                                        .unwrap_or_else(|e| {
-                                                            eprintln!("Error: {}", e);
-                                                        })
-                                                });
+                                                let data = b64.decode(&args[1]).unwrap();
+                                                let data =
+                                                    bincode::deserialize::<(Identifier, round2::SignatureShare)>(
+                                                        &data,
+                                                    ).unwrap();
+                                                let _ = r3_sign_tx.send((topic, data.0, data.1));
                                             },
                                             _ => {
                                                 eprintln!("Received: {:?}", data);
@@ -559,22 +431,9 @@ async fn main() {
                                     },
                                 }
                             },
-                            gossipsub::Event::Subscribed { peer_id, topic } => {
+                            gossipsub::Event::Subscribed { topic, peer_id } => {
                                 eprintln!("Subscribed to topic: {} from peer: {}", topic, peer_id);
-
-                                // create subscribed database
-                                if !subscribed_db.contains_key(&topic) {
-                                    let _ = subscribed_db.insert(topic.clone(), Vec::new());
-                                }
-
-                                // insert peer id into subscribed database
-                                subscribed_db.get_mut(&topic).unwrap().push(peer_id);
-
-                                // check if subscribed to all peers
-                                let peers = subscribed_db.get(&topic).unwrap();
-                                if peers.len() == (*MAX_SIGNERS).into() {
-                                    let _ = subscribed_tx.send((topic, peers.clone()));
-                                }
+                                let _ = subscribed_tx.send((topic, peer_id));
                             },
                             _ => {
                                 eprintln!("Gossipsub event: {:?}", event);

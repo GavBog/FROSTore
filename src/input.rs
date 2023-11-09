@@ -1,12 +1,18 @@
-use crate::settings::MAX_SIGNERS;
+use crate::settings::{
+    MAX_SIGNERS,
+    MIN_SIGNERS,
+};
 use anyhow::Result;
 use base64::{
     engine::general_purpose::STANDARD as b64,
     Engine,
 };
-use dashmap::DashMap;
+use frost_ed25519::{
+    round1,
+    Identifier,
+    SigningPackage,
+};
 use libp2p::{
-    gossipsub,
     gossipsub::TopicHash,
     kad::{
         store::MemoryStore,
@@ -20,7 +26,7 @@ use rand::{
     distributions::Alphanumeric,
     Rng,
 };
-use std::sync::Arc;
+use std::collections::BTreeMap;
 use tokio::select;
 
 pub async fn add_peer(mut args: Vec<String>, kademlia: &mut Kademlia<MemoryStore>) -> Result<()> {
@@ -33,17 +39,14 @@ pub async fn add_peer(mut args: Vec<String>, kademlia: &mut Kademlia<MemoryStore
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub async fn generate(
-    direct_peer_msg: tokio::sync::broadcast::Sender<(PeerId, Vec<u8>)>,
+    direct_peer_msg: tokio::sync::mpsc::UnboundedSender<(PeerId, Vec<u8>)>,
     mut closest_peer_rx: tokio::sync::broadcast::Receiver<(QueryId, GetClosestPeersOk)>,
-    mut subscribed_rx: tokio::sync::broadcast::Receiver<(TopicHash, Vec<PeerId>)>,
-    peer_id: String,
-    peer_msg: tokio::sync::broadcast::Sender<(TopicHash, Vec<u8>)>,
+    mut subscribed_rx: tokio::sync::broadcast::Receiver<(TopicHash, PeerId)>,
+    peer_msg: tokio::sync::mpsc::UnboundedSender<(TopicHash, Vec<u8>)>,
     query_id: QueryId,
-    subscribe_tx: tokio::sync::broadcast::Sender<gossipsub::IdentTopic>,
 ) -> Result<()> {
-    eprintln!("Generating onion");
+    eprintln!("Starting Generation");
 
     // generate random generation id
     let generation_id: String = rand::thread_rng().sample_iter(&Alphanumeric).take(32).map(char::from).collect();
@@ -59,7 +62,6 @@ pub async fn generate(
             },
             result = closest_peer_rx.recv() => {
                 let (received_query_id, ok) = result?;
-                eprintln!("Received query id: {:?}", received_query_id);
                 if received_query_id == query_id {
                     break ok;
                 }
@@ -74,37 +76,38 @@ pub async fn generate(
         peer_map.push(peer.to_string());
     }
 
-    // subscribe to generation id topic
-    let _ = subscribe_tx.send(gossipsub::IdentTopic::new(generation_id.clone()));
-
     // send messages to peers
     for count in 1 ..= peer_map.len() {
         let peer = peer_map.get(count - 1).unwrap();
-        let send_message = (generation_id.clone(), peer_id.clone(), count as u16);
+        let send_message = (generation_id.clone(), count as u16);
         let send_message = bincode::serialize(&send_message)?;
         let send_message = b64.encode(send_message);
 
-        // Begin Key Generation
-        let _ = direct_peer_msg.send((peer.parse()?, format!("JOIN_GEN {}", send_message).as_bytes().to_vec()));
+        // Initialize Generation
+        let _ = direct_peer_msg.send((peer.parse()?, format!("GEN_START {}", send_message).as_bytes().to_vec()));
     }
 
-    // wait for response from each peer
-    let timer = tokio::time::sleep(tokio::time::Duration::from_secs(120));
+    // wait for MAX_SIGNERS # of participants to be subscribed
+    let mut responses = Vec::new();
+    let timer = tokio::time::sleep(tokio::time::Duration::from_secs(30));
     tokio::pin!(timer);
-    let responses: Vec<PeerId> = loop {
+    loop {
         select!{
             _ =& mut timer => {
                 return Err(anyhow::anyhow!("Timed out"));
             },
             result = subscribed_rx.recv() => {
                 let result = result?;
-                let (topic, peers) = result;
+                let (topic, peer) = result;
                 if topic.as_str() == generation_id {
-                    break peers;
+                    responses.push(peer);
+                }
+                if responses.len() >= *MAX_SIGNERS as usize {
+                    break;
                 }
             },
         }
-    };
+    }
 
     // validate that responses are from the correct peers
     for peer in responses {
@@ -121,26 +124,48 @@ pub async fn generate(
 
 pub async fn sign(
     mut args: Vec<String>,
-    peer_msg: tokio::sync::broadcast::Sender<(TopicHash, Vec<u8>)>,
-    signing_message_db: Arc<DashMap<String, String>>,
+    mut signing_package_rx: tokio::sync::broadcast::Receiver<(TopicHash, Identifier, round1::SigningCommitments)>,
+    peer_msg: tokio::sync::mpsc::UnboundedSender<(TopicHash, Vec<u8>)>,
 ) -> Result<()> {
     eprintln!("Signing message");
 
     // get generation id and message
     let onion = args.remove(0);
-    let message = args.remove(0);
-
-    // generate random signing id
-    let signing_id: String = rand::thread_rng().sample_iter(&Alphanumeric).take(32).map(char::from).collect();
-
-    // store signing id and message
-    signing_message_db.insert(signing_id.clone(), message.clone());
+    let message = args.remove(0).as_bytes().to_vec();
 
     // send the message to the other participants to begin the signing process
-    let send_message = (signing_id, &*onion, message);
-    let send_message = bincode::serialize(&send_message)?;
-    let send_message = b64.encode(send_message);
+    let topic = TopicHash::from_raw(onion);
+    let send_message = b64.encode(&message);
     let send_message = format!("SIGN_R1 {}", send_message).as_bytes().to_vec();
-    let _ = peer_msg.send((TopicHash::from_raw(onion), send_message));
+    peer_msg.send((topic.clone(), send_message))?;
+
+    // await commitments and generate signing package
+    let mut commitments_db = BTreeMap::new();
+    let timer = tokio::time::sleep(tokio::time::Duration::from_secs(30));
+    tokio::pin!(timer);
+    loop {
+        select!{
+            _ =& mut timer => {
+                return Err(anyhow::anyhow!("Timed out"));
+            },
+            result = signing_package_rx.recv() => {
+                let (recieved_topic, participant_identifier, commitments) = result?;
+                if recieved_topic == topic {
+                    commitments_db.insert(participant_identifier, commitments);
+                }
+                if commitments_db.len() > *MIN_SIGNERS as usize {
+                    break;
+                }
+            },
+        }
+    }
+
+    // create signing_package
+    let signing_package = SigningPackage::new(commitments_db, &message);
+
+    // send SIGN_R2 message
+    let send_message = b64.encode(signing_package.serialize()?);
+    let send_message = format!("SIGN_R2 {}", send_message).as_bytes().to_vec();
+    let _ = peer_msg.send((topic, send_message));
     Ok(())
 }
