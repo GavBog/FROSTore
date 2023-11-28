@@ -1,6 +1,9 @@
 [package]
 name = "frostore"
+description = "Schnorr Threshold Signature Database"
+repository = "https://github.com/GavBog/FROSTore"
 version = "0.1.0"
+license = "GPL-3.0"
 edition = "2021"
 
 [dependencies]
