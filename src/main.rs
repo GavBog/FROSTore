@@ -15,15 +15,20 @@ use frostore::{
     input,
     settings::MAX_SIGNERS,
     sign,
+    util::{
+        KEYS,
+        PEER_ID,
+    },
 };
 use futures::StreamExt;
-use libp2p::gossipsub::IdentTopic;
 use libp2p::{
     core::transport::upgrade::Version,
-    gossipsub,
-    gossipsub::TopicHash,
+    gossipsub::{
+        self,
+        IdentTopic,
+        TopicHash,
+    },
     identify,
-    identity,
     kad::{
         store::MemoryStore,
         Behaviour as Kademlia,
@@ -48,9 +53,8 @@ use libp2p::{
     Swarm,
     Transport,
 };
-use once_cell::sync::Lazy;
-use std::collections::BTreeMap;
 use std::{
+    collections::BTreeMap,
     sync::Arc,
     time::Duration,
 };
@@ -99,9 +103,6 @@ impl From<request_response::Event<Vec<u8>, Vec<u8>>> for MyBehaviourEvent {
         MyBehaviourEvent::RequestResponse(event)
     }
 }
-
-static KEYS: Lazy<identity::Keypair> = Lazy::new(identity::Keypair::generate_ed25519);
-static PEER_ID: Lazy<PeerId> = Lazy::new(|| PeerId::from(KEYS.public()));
 
 #[tokio::main]
 async fn main() {
@@ -153,7 +154,7 @@ async fn main() {
     let key_db = Arc::new(DashMap::new());
     let peer_id_db = Arc::new(DashMap::new());
 
-    // create channel
+    // create channels
     let (closest_peer_tx, _) = tokio::sync::broadcast::channel(32);
     let (direct_peer_msg, mut direct_msg_reader) = tokio::sync::mpsc::unbounded_channel();
     let (peer_msg, mut msg_reader) = tokio::sync::mpsc::unbounded_channel();

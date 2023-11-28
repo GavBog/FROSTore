@@ -11,7 +11,7 @@ dashmap = "5"
 data-encoding = "2"
 frost-ed25519 = { git = "https://github.com/ZcashFoundation/frost.git", package="frost-ed25519" }
 futures = "0.3"
-libp2p = { git = "https://github.com/libp2p/rust-libp2p.git", features = ["cbor", "gossipsub", "identify", "kad", "macros", "noise", "request-response", "tcp", "tokio", "yamux"] }
+libp2p = { version = "0.53", features = ["cbor", "gossipsub", "identify", "kad", "macros", "noise", "request-response", "tcp", "tokio", "yamux"] }
 once_cell = "1"
 rand = "0.8"
 sha3 = "0.10"

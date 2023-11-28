@@ -1,8 +1,16 @@
 use data_encoding::BASE32_NOPAD;
+use libp2p::{
+    identity,
+    PeerId,
+};
+use once_cell::sync::Lazy;
 use sha3::{
     Digest,
     Sha3_256,
 };
+
+pub static KEYS: Lazy<identity::Keypair> = Lazy::new(identity::Keypair::generate_ed25519);
+pub static PEER_ID: Lazy<PeerId> = Lazy::new(|| PeerId::from(KEYS.public()));
 
 pub fn onion_address(pubkey: Vec<u8>) -> String {
     let version = vec![0x03];
@@ -19,6 +27,6 @@ pub fn onion_address(pubkey: Vec<u8>) -> String {
     decoded.extend(checksum);
     decoded.extend(version);
 
-    // return the b64 encoded string
+    // return the encoded string
     BASE32_NOPAD.encode(&decoded).to_lowercase()
 }
