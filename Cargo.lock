@@ -422,9 +422,9 @@ checksum = "28c122c3980598d243d63d9a704629a2d748d101f278052ff068be5a4423ab6f"
 
 [[package]]
 name = "core-foundation"
-version = "0.9.3"
+version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "194a7a9e6de53fa55116934067c844d9d749312f75c6f6d0980e8c252f8c2146"
+checksum = "91e195e091a93c46f7102ec7818a2aa394e1e1771c3ab4825963fa03e45afb8f"
 dependencies = [
  "core-foundation-sys",
  "libc",
@@ -432,9 +432,9 @@ dependencies = [
 
 [[package]]
 name = "core-foundation-sys"
-version = "0.8.4"
+version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e496a50fda8aacccc86d7529e2c1e0892dbd0f898a6b5645b5561b89c3210efa"
+checksum = "06ea2b9bc92be3c2baa9334a323ebca2d6f074ff852cd1d7b11064035cd3868f"
 
 [[package]]
 name = "core2"
@@ -807,7 +807,7 @@ dependencies = [
 
 [[package]]
 name = "frostore"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -1789,9 +1789,9 @@ checksum = "0717cef1bc8b636c6e1c1bbdefc09e6322da8a9321966e8928ef80d20f7f770f"
 
 [[package]]
 name = "linux-raw-sys"
-version = "0.4.11"
+version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "969488b55f8ac402214f3f5fd243ebb7206cf82de60d3172994707a4bcc2b829"
+checksum = "c4cd1a83af159aa67994778be9070f0ae1bd732942279cabb14f86f986a21456"
 
 [[package]]
 name = "litrs"
@@ -2472,9 +2472,9 @@ dependencies = [
 
 [[package]]
 name = "ring"
-version = "0.17.5"
+version = "0.17.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb0205304757e5d899b9c2e448b867ffd03ae7f988002e47cd24954391394d0b"
+checksum = "684d5e6e18f669ccebf64a92236bb7db9a34f07be010e3627368182027180866"
 dependencies = [
  "cc",
  "getrandom",
@@ -2549,7 +2549,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "629648aced5775d558af50b2b4c7b02983a04b312126d45eeead26e7caa498b9"
 dependencies = [
  "log",
- "ring 0.17.5",
+ "ring 0.17.6",
  "rustls-webpki",
  "sct",
 ]
@@ -2560,7 +2560,7 @@ version = "0.101.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b6275d1ee7a1cd780b64aca7726599a1dbc893b1e64144529e55c3c2f745765"
 dependencies = [
- "ring 0.17.5",
+ "ring 0.17.6",
  "untrusted 0.9.0",
 ]
 
@@ -2587,7 +2587,7 @@ version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da046153aa2352493d6cb7da4b6e5c0c057d8a1d0a9aa8560baffdd945acd414"
 dependencies = [
- "ring 0.17.5",
+ "ring 0.17.6",
  "untrusted 0.9.0",
 ]
 
@@ -2692,7 +2692,7 @@ dependencies = [
  "chacha20poly1305",
  "curve25519-dalek",
  "rand_core",
- "ring 0.17.5",
+ "ring 0.17.6",
  "rustc_version",
  "sha2",
  "subtle",
@@ -2735,9 +2735,9 @@ dependencies = [
 
 [[package]]
 name = "spki"
-version = "0.7.2"
+version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d1e996ef02c474957d681f1b05213dfb0abab947b446a62d37770b23500184a"
+checksum = "d91ed6c858b01f942cd56b37a94b3e0a1798290327d1236e4d9cf4eaca44d29d"
 dependencies = [
  "base64ct",
  "der",
@@ -3416,18 +3416,18 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
-version = "0.7.26"
+version = "0.7.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e97e415490559a91254a2979b4829267a57d2fcd741a98eee8b722fb57289aa0"
+checksum = "f43de342578a3a14a9314a2dab1942cbfcbe5686e1f91acdc513058063eafe18"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.7.26"
+version = "0.7.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd7e48ccf166952882ca8bd778a43502c64f33bf94c12ebe2a7f08e5a0f6689f"
+checksum = "e1012d89e3acb79fad7a799ce96866cfb8098b74638465ea1b1533d35900ca90"
 dependencies = [
  "proc-macro2",
  "quote",

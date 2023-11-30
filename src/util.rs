@@ -11,6 +11,7 @@ use sha3::{
 
 pub static KEYS: Lazy<identity::Keypair> = Lazy::new(identity::Keypair::generate_ed25519);
 pub static PEER_ID: Lazy<PeerId> = Lazy::new(|| PeerId::from(KEYS.public()));
+pub static PROTOCOL_VERSION: Lazy<String> = Lazy::new(|| format!("/FROSTore/{}", env!("CARGO_PKG_VERSION")));
 
 pub fn onion_address(pubkey: Vec<u8>) -> String {
     let version = vec![0x03];

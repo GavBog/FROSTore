@@ -1,3 +1,4 @@
+use anyhow::Result;
 use base64::{
     engine::general_purpose::STANDARD as b64,
     Engine,
@@ -18,11 +19,11 @@ use frostore::{
     util::{
         KEYS,
         PEER_ID,
+        PROTOCOL_VERSION,
     },
 };
 use futures::StreamExt;
 use libp2p::{
-    core::transport::upgrade::Version,
     gossipsub::{
         self,
         IdentTopic,
@@ -42,7 +43,6 @@ use libp2p::{
         ProtocolSupport,
     },
     swarm::{
-        Config as SwarmConfig,
         NetworkBehaviour,
         StreamProtocol,
         SwarmEvent,
@@ -50,8 +50,7 @@ use libp2p::{
     tcp,
     yamux,
     PeerId,
-    Swarm,
-    Transport,
+    SwarmBuilder,
 };
 use std::{
     collections::BTreeMap,
@@ -64,8 +63,8 @@ use tokio::{
 };
 
 #[derive(NetworkBehaviour)]
-#[behaviour(to_swarm = "MyBehaviourEvent")]
-struct MyBehaviour {
+#[behaviour(to_swarm = "BehaviourEvent")]
+struct Behaviour {
     gossipsub: gossipsub::Behaviour,
     identify: identify::Behaviour,
     kad: Kademlia<MemoryStore>,
@@ -73,83 +72,39 @@ struct MyBehaviour {
 }
 
 #[derive(Debug)]
-enum MyBehaviourEvent {
+enum BehaviourEvent {
     Gossipsub(gossipsub::Event),
     Identify(identify::Event),
     Kademlia(KademliaEvent),
     RequestResponse(request_response::Event<Vec<u8>, Vec<u8>>),
 }
 
-impl From<gossipsub::Event> for MyBehaviourEvent {
+impl From<gossipsub::Event> for BehaviourEvent {
     fn from(event: gossipsub::Event) -> Self {
-        MyBehaviourEvent::Gossipsub(event)
+        BehaviourEvent::Gossipsub(event)
     }
 }
 
-impl From<identify::Event> for MyBehaviourEvent {
+impl From<identify::Event> for BehaviourEvent {
     fn from(event: identify::Event) -> Self {
-        MyBehaviourEvent::Identify(event)
+        BehaviourEvent::Identify(event)
     }
 }
 
-impl From<KademliaEvent> for MyBehaviourEvent {
+impl From<KademliaEvent> for BehaviourEvent {
     fn from(event: KademliaEvent) -> Self {
-        MyBehaviourEvent::Kademlia(event)
+        BehaviourEvent::Kademlia(event)
     }
 }
 
-impl From<request_response::Event<Vec<u8>, Vec<u8>>> for MyBehaviourEvent {
+impl From<request_response::Event<Vec<u8>, Vec<u8>>> for BehaviourEvent {
     fn from(event: request_response::Event<Vec<u8>, Vec<u8>>) -> Self {
-        MyBehaviourEvent::RequestResponse(event)
+        BehaviourEvent::RequestResponse(event)
     }
 }
 
 #[tokio::main]
-async fn main() {
-    // get peer id
-    let id_string = PEER_ID.to_string();
-
-    // create transport
-    let transport =
-        tcp::tokio::Transport::default()
-            .upgrade(Version::V1Lazy)
-            .authenticate(noise::Config::new(&KEYS).unwrap())
-            .multiplex(yamux::Config::default())
-            .boxed();
-
-    // create gossipsub
-    let gossipsub =
-        gossipsub::Behaviour::new(
-            gossipsub::MessageAuthenticity::Signed(KEYS.clone()),
-            gossipsub::ConfigBuilder::default().build().unwrap(),
-        ).unwrap();
-
-    // create peer identity
-    let protocol_version = "/FROSTore/0.1.0";
-    let identify = identify::Behaviour::new(identify::Config::new(protocol_version.to_string(), KEYS.public()));
-
-    // create kademlia DHT
-    let kad = Kademlia::with_config(*PEER_ID, MemoryStore::new(*PEER_ID), KademliaConfig::default());
-
-    // create request response
-    let req_res =
-        request_response::cbor::Behaviour::new(
-            [(StreamProtocol::new(protocol_version), ProtocolSupport::Full)],
-            request_response::Config::default(),
-        );
-
-    // create behaviour
-    let behaviour = MyBehaviour {
-        gossipsub,
-        identify,
-        kad,
-        req_res,
-    };
-
-    // create swarm
-    let swarm_config = SwarmConfig::with_tokio_executor().with_idle_connection_timeout(Duration::from_secs(5));
-    let mut swarm = Swarm::new(transport, behaviour, *PEER_ID, swarm_config);
-
+async fn main() -> Result<()> {
     // create databases
     let key_db = Arc::new(DashMap::new());
     let peer_id_db = Arc::new(DashMap::new());
@@ -163,21 +118,48 @@ async fn main() {
     let (r3_gen_tx, _) = tokio::sync::broadcast::channel((*MAX_SIGNERS * 32) as usize);
     let (r3_sign_tx, _) = tokio::sync::broadcast::channel((*MAX_SIGNERS * 32) as usize);
     let (signing_package_tx, _) = tokio::sync::broadcast::channel((*MAX_SIGNERS * 32) as usize);
-    let (subscribe_tx, mut subscribe_rx) = tokio::sync::broadcast::channel(*MAX_SIGNERS as usize);
+    let (subscribe_tx, mut subscribe_rx) = tokio::sync::mpsc::unbounded_channel();
     let (subscribed_tx, _) = tokio::sync::broadcast::channel((*MAX_SIGNERS * 32) as usize);
+
+    // create swarm
+    let mut swarm =
+        SwarmBuilder::with_existing_identity(KEYS.clone())
+            .with_tokio()
+            .with_tcp(tcp::Config::default().nodelay(true), noise::Config::new, yamux::Config::default)?
+            .with_quic()
+            .with_behaviour(|keypair| Behaviour {
+                gossipsub: gossipsub::Behaviour::new(
+                    gossipsub::MessageAuthenticity::Signed(keypair.clone()),
+                    gossipsub::ConfigBuilder::default().build().unwrap(),
+                ).unwrap(),
+                identify: identify::Behaviour::new(
+                    identify::Config::new(PROTOCOL_VERSION.clone(), keypair.public()),
+                ),
+                kad: Kademlia::with_config(
+                    keypair.public().to_peer_id(),
+                    MemoryStore::new(keypair.public().to_peer_id()),
+                    KademliaConfig::default(),
+                ),
+                req_res: request_response::cbor::Behaviour::new(
+                    [(StreamProtocol::new(&PROTOCOL_VERSION), ProtocolSupport::Full)],
+                    request_response::Config::default(),
+                ),
+            })?
+            .with_swarm_config(|config| config.with_idle_connection_timeout(Duration::from_secs(5)))
+            .build();
 
     // set kademlia to server mode
     swarm.behaviour_mut().kad.set_mode(Some(Mode::Server));
 
     // start listening
-    let _ = swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse().unwrap());
+    let _ = swarm.listen_on("/ip4/0.0.0.0/udp/0/quic-v1".parse()?);
+    let _ = swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?);
 
     // start stdin reader
     let mut stdin = tokio::io::BufReader::new(tokio::io::stdin()).lines();
 
     // start main loop
     loop {
-        // select between swarm events and stdin
         select!{
             line = stdin.next_line() => {
                 if let Some(line) = line.expect("line exists") {
@@ -185,9 +167,7 @@ async fn main() {
                     match args.remove(0).as_str() {
                         "ADD_PEER" => {
                             let kademlia = &mut swarm.behaviour_mut().kad;
-                            input::add_peer(args, kademlia).await.unwrap_or_else(|e| {
-                                eprintln!("Error: {}", e);
-                            });
+                            input::add_peer(args, kademlia).await?;
                         },
                         "GENERATE" => {
                             let closest_peer_rx = closest_peer_tx.subscribe();
@@ -234,7 +214,7 @@ async fn main() {
                     // handle swarm events
                     Some(SwarmEvent::NewListenAddr { address, .. }) => {
                         eprintln!("Listening on {}", address);
-                        eprintln!("ADD_PEER {} {}", id_string, address);
+                        eprintln!("ADD_PEER {} {}", *PEER_ID, address);
                     },
                     Some(SwarmEvent::ConnectionEstablished { peer_id, .. }) => {
                         eprintln!("Connected to {}", peer_id);
@@ -243,7 +223,7 @@ async fn main() {
                         eprintln!("Disconnected from {}", peer_id);
                     },
                     // hand request response events
-                    Some(SwarmEvent::Behaviour(MyBehaviourEvent::RequestResponse(event))) => {
+                    Some(SwarmEvent::Behaviour(BehaviourEvent::RequestResponse(event))) => {
                         match event {
                             request_response
                             ::Event
@@ -252,17 +232,17 @@ async fn main() {
                                 ..
                             } => {
                                 // handle generation messages get data from message
-                                let data = String::from_utf8(request.clone()).unwrap();
+                                let data = String::from_utf8(request.clone())?;
                                 let args = data.split(' ').map(|s| s.to_string()).collect::<Vec<String>>();
                                 let req_type = args[0].as_str();
                                 match req_type {
                                     // Join Generation Gossipsub Topic
                                     "GEN_START" => {
-                                        eprintln!("Generating round 1");
+                                        eprintln!("Beginning new Generation!");
 
                                         // get data from message
-                                        let data = b64.decode(&args[1]).unwrap();
-                                        let data = bincode::deserialize::<(String, u16)>(&data).unwrap();
+                                        let data = b64.decode(&args[1])?;
+                                        let data = bincode::deserialize::<(String, u16)>(&data)?;
                                         let generation_id = data.0;
                                         let participant_id = data.1;
 
@@ -284,11 +264,9 @@ async fn main() {
                                     // create signing package
                                     "SIGNING_PACKAGE" => {
                                         eprintln!("Signing package request received");
-                                        let data = b64.decode(args[1].as_str()).unwrap();
+                                        let data = b64.decode(args[1].as_str())?;
                                         let data =
-                                            bincode::deserialize::<(&str, Identifier, SigningCommitments)>(
-                                                &data,
-                                            ).unwrap();
+                                            bincode::deserialize::<(&str, Identifier, SigningCommitments)>(&data)?;
                                         let _ =
                                             signing_package_tx.send((TopicHash::from_raw(data.0), data.1, data.2));
                                     },
@@ -303,7 +281,7 @@ async fn main() {
                         }
                     },
                     // handle gossipsub events
-                    Some(SwarmEvent::Behaviour(MyBehaviourEvent::Gossipsub(event))) => {
+                    Some(SwarmEvent::Behaviour(BehaviourEvent::Gossipsub(event))) => {
                         match event {
                             gossipsub::Event::Message { message, propagation_source, .. } => {
                                 match message.topic {
@@ -315,13 +293,14 @@ async fn main() {
                                             .collect::<Vec<&TopicHash>>()
                                             .contains(&&topic) => {
                                         // get data from message
-                                        let data = String::from_utf8(message.data).unwrap();
+                                        let data = String::from_utf8(message.data)?;
                                         let args =
                                             data.split(' ').map(|s| s.to_string()).collect::<Vec<String>>();
                                         let req_type = args[0].as_str();
                                         match req_type {
                                             // Key Generation Round 1
                                             "GEN_R1" => {
+                                                eprintln!("Generating round 1");
                                                 let direct_peer_msg = direct_peer_msg.clone();
                                                 let peer_id_db = peer_id_db.clone();
                                                 let peer_msg = peer_msg.clone();
@@ -357,30 +336,30 @@ async fn main() {
                                             // Key Generation Round 2
                                             "GEN_R2" => {
                                                 eprintln!("Generating round 2");
-                                                let message = b64.decode(&args[1]).unwrap();
+                                                let message = b64.decode(&args[1])?;
                                                 let data =
                                                     bincode::deserialize::<(Identifier, dkg::round1::Package)>(
                                                         &message,
-                                                    ).unwrap();
+                                                    )?;
                                                 let _ = r2_gen_tx.send((topic, data.0, data.1));
                                             },
                                             // Key Generation Round 3
                                             "GEN_FINAL" => {
                                                 eprintln!("Generating final");
-                                                let message = b64.decode(&args[1]).unwrap();
+                                                let message = b64.decode(&args[1])?;
                                                 let data =
                                                     bincode
                                                     ::deserialize::<
                                                         (Identifier, BTreeMap<Identifier, dkg::round2::Package>),
                                                     >(
                                                         &message,
-                                                    ).unwrap();
+                                                    )?;
                                                 let _ = r3_gen_tx.send((topic, data.0, data.1));
                                             },
                                             // Signing Round 1
                                             "SIGN_R1" => {
                                                 eprintln!("Signing round 1");
-                                                let message = b64.decode(&args[1]).unwrap();
+                                                let message = b64.decode(&args[1])?;
                                                 let direct_peer_msg = direct_peer_msg.clone();
                                                 let key_db = key_db.clone();
                                                 let peer_id_db = peer_id_db.clone();
@@ -408,18 +387,18 @@ async fn main() {
                                             // Signing Round 2
                                             "SIGN_R2" => {
                                                 eprintln!("Signing round 2");
-                                                let data = b64.decode(&args[1]).unwrap();
-                                                let signing_package = SigningPackage::deserialize(&data).unwrap();
+                                                let data = b64.decode(&args[1])?;
+                                                let signing_package = SigningPackage::deserialize(&data)?;
                                                 let _ = r2_sign_tx.send((topic, signing_package));
                                             },
                                             // Signing Round 3
                                             "SIGN_FINAL" => {
                                                 eprintln!("Signing final");
-                                                let data = b64.decode(&args[1]).unwrap();
+                                                let data = b64.decode(&args[1])?;
                                                 let data =
                                                     bincode::deserialize::<(Identifier, round2::SignatureShare)>(
                                                         &data,
-                                                    ).unwrap();
+                                                    )?;
                                                 let _ = r3_sign_tx.send((topic, data.0, data.1));
                                             },
                                             _ => {
@@ -442,17 +421,13 @@ async fn main() {
                         }
                     },
                     // handle get closest peers event
-                    Some(
-                        SwarmEvent::Behaviour(
-                            MyBehaviourEvent::Kademlia(KademliaEvent::OutboundQueryProgressed { id, result, .. }),
-                        ),
-                    ) => {
+                    Some(SwarmEvent::Behaviour(BehaviourEvent::Kademlia(KademliaEvent::OutboundQueryProgressed { id, result, .. }))) => {
                         if let libp2p::kad::QueryResult::GetClosestPeers(Ok(ok)) = result {
                             let _ = closest_peer_tx.send((id, ok));
                         }
                     },
                     // handle identify events
-                    Some(SwarmEvent::Behaviour(MyBehaviourEvent::Identify(event))) => {
+                    Some(SwarmEvent::Behaviour(BehaviourEvent::Identify(event))) => {
                         match event {
                             identify::Event::Received { peer_id, info } => {
                                 // add peer to kademlia DHT
@@ -465,7 +440,7 @@ async fn main() {
                         }
                     },
                     // handle kademlia events
-                    Some(SwarmEvent::Behaviour(MyBehaviourEvent::Kademlia(event))) => match event {
+                    Some(SwarmEvent::Behaviour(BehaviourEvent::Kademlia(event))) => match event {
                         KademliaEvent::RoutingUpdated { peer, is_new_peer, .. } => {
                             eprintln!("Routing updated for peer: {}", peer);
                             eprintln!("Is new peer: {}", is_new_peer);

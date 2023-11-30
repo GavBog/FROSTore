@@ -59,7 +59,7 @@ pub async fn generator(
                 return Err(anyhow::anyhow!("Timed out"));
             },
             result = r2_gen_rx.recv() => {
-                let (recv_gen_id, recv_participant_id, recv_package) = result.unwrap();
+                let (recv_gen_id, recv_participant_id, recv_package) = result?;
                 if recv_gen_id == topic {
                     r1_package_db.insert(recv_participant_id, recv_package);
                 }
@@ -89,7 +89,7 @@ pub async fn generator(
                 return Err(anyhow::anyhow!("Timed out"));
             },
             result = r3_gen_rx.recv() => {
-                let (recv_gen_id, remote_participant_id, received_packages) = result.unwrap();
+                let (recv_gen_id, remote_participant_id, received_packages) = result?;
                 if recv_gen_id == topic {
                     for (receiver_identifier, received_round2_package) in received_packages {
                         if receiver_identifier == participant_identifier {
