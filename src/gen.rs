@@ -1,15 +1,5 @@
-use crate::{
-    settings::{
-        MAX_SIGNERS,
-        MIN_SIGNERS,
-    },
-    util::onion_address,
-};
+use crate::RequestData;
 use anyhow::Result;
-use base64::{
-    engine::general_purpose::STANDARD as b64,
-    Engine,
-};
 use dashmap::DashMap;
 use frost::{
     keys::dkg,
@@ -24,30 +14,27 @@ use std::{
 use tokio::select;
 
 pub async fn generator(
-    key_db: Arc<DashMap<String, (frost::keys::PublicKeyPackage, frost::keys::KeyPackage)>>,
+    (max_signers, min_signers): (u16, u16),
+    key_db: Arc<DashMap<Vec<u8>, (frost::keys::PublicKeyPackage, frost::keys::KeyPackage)>>,
     mut r2_gen_rx: tokio::sync::broadcast::Receiver<(TopicHash, Identifier, dkg::round1::Package)>,
     mut r3_gen_rx:
         tokio::sync::broadcast::Receiver<(TopicHash, Identifier, BTreeMap<Identifier, dkg::round2::Package>)>,
-    peer_id_db: Arc<DashMap<String, u16>>,
+    peer_id_db: Arc<DashMap<Vec<u8>, u16>>,
     peer_msg: tokio::sync::mpsc::UnboundedSender<(TopicHash, Vec<u8>)>,
     topic: TopicHash,
-) -> Result<String> {
-    let generation_id = topic.to_string();
+) -> Result<Vec<u8>> {
+    let generation_id = topic.as_str().as_bytes().to_vec();
     let participant_id = *peer_id_db.get(&generation_id).unwrap();
     let participant_identifier = Identifier::try_from(participant_id)?;
-    eprintln!("New Generation: {}", generation_id);
-    eprintln!("Participant ID: {}", participant_id);
 
     // round 1 key generation
     let rng = rand::rngs::OsRng;
     let (round1_secret_package, round1_package) =
-        dkg::part1(participant_id.try_into()?, *MAX_SIGNERS, *MIN_SIGNERS, rng)?;
+        dkg::part1(participant_id.try_into()?, max_signers, min_signers, rng)?;
 
     // send round 1 data to the other participants for use in r2
-    let send_message = (participant_identifier, round1_package);
-    let send_message = bincode::serialize(&send_message)?;
-    let send_message = b64.encode(send_message);
-    peer_msg.send((topic.clone(), format!("GEN_R2 {}", send_message).as_bytes().to_vec()))?;
+    let send_message = bincode::serialize(&RequestData::GenR2(participant_identifier, round1_package))?;
+    peer_msg.send((topic.clone(), send_message))?;
 
     // finished round 1... await r1_packages for use in r2
     let mut r1_package_db = BTreeMap::new();
@@ -63,7 +50,7 @@ pub async fn generator(
                 if recv_gen_id == topic {
                     r1_package_db.insert(recv_participant_id, recv_package);
                 }
-                if r1_package_db.len() + 1 >= (*MAX_SIGNERS).into() {
+                if r1_package_db.len() + 1 >= (max_signers).into() {
                     break;
                 }
             },
@@ -74,10 +61,8 @@ pub async fn generator(
     let (round2_secret_package, round2_packages) = dkg::part2(round1_secret_package, &r1_package_db)?;
 
     // send round 2 data to the other participants for use in final round
-    let send_message = (participant_identifier, round2_packages);
-    let send_message = bincode::serialize(&send_message)?;
-    let send_message = b64.encode(send_message);
-    let _ = peer_msg.send((topic.clone(), format!("GEN_FINAL {}", send_message).as_bytes().to_vec()));
+    let send_message = bincode::serialize(&RequestData::GenFinal(participant_identifier, round2_packages))?;
+    let _ = peer_msg.send((topic.clone(), send_message));
 
     // finished round 2... await r2_packages for use in final round
     let mut r2_package_db = BTreeMap::new();
@@ -97,7 +82,7 @@ pub async fn generator(
                         }
                     }
                 }
-                if r2_package_db.len() + 1 >= (*MAX_SIGNERS).into() {
+                if r2_package_db.len() + 1 >= (max_signers).into() {
                     break;
                 }
             },
@@ -107,14 +92,11 @@ pub async fn generator(
     // aggregate signatures
     let (key_package, pubkey_package) = dkg::part3(&round2_secret_package, &r1_package_db, &r2_package_db)?;
 
-    // create onion address
-    let onion = onion_address(pubkey_package.verifying_key().serialize().to_vec());
-    eprintln!("Generated Onion: {}", onion);
-
     // add keys to the database
-    peer_id_db.insert(onion.clone(), peer_id_db.remove(&generation_id).unwrap().1);
-    key_db.insert(onion.clone(), (pubkey_package, key_package));
+    let pubkey = pubkey_package.verifying_key().serialize().to_vec();
+    peer_id_db.insert(pubkey.clone(), peer_id_db.remove(&generation_id).unwrap().1);
+    key_db.insert(pubkey.clone(), (pubkey_package, key_package));
 
     // return data to be sent back to the original requester
-    Ok(onion)
+    Ok(pubkey)
 }

@@ -1,7 +1,10 @@
-use crate::settings::MIN_SIGNERS;
+use crate::{
+    DirectMsgData,
+    RequestData,
+};
 use anyhow::Result;
 use base64::{
-    engine::general_purpose::STANDARD as b64,
+    engine::general_purpose::STANDARD_NO_PAD as b64,
     Engine,
 };
 use dashmap::DashMap;
@@ -29,19 +32,20 @@ use tokio::select;
 #[allow(clippy::too_many_arguments)]
 pub async fn signer(
     direct_peer_msg: tokio::sync::mpsc::UnboundedSender<(PeerId, Vec<u8>)>,
-    key_db: Arc<DashMap<String, (PublicKeyPackage, KeyPackage)>>,
+    key_db: Arc<DashMap<Vec<u8>, (PublicKeyPackage, KeyPackage)>>,
     message: Vec<u8>,
+    min_signers: u16,
     mut r2_sign_rx: tokio::sync::broadcast::Receiver<(TopicHash, SigningPackage)>,
     mut r3_sign_rx: tokio::sync::broadcast::Receiver<(TopicHash, Identifier, round2::SignatureShare)>,
-    peer_id_db: Arc<DashMap<String, u16>>,
+    peer_id_db: Arc<DashMap<Vec<u8>, u16>>,
     peer_msg: tokio::sync::mpsc::UnboundedSender<(TopicHash, Vec<u8>)>,
     propagation_source: PeerId,
     topic: TopicHash,
 ) -> Result<()> {
-    let onion = topic.as_str();
-    let participant_id = *peer_id_db.get(onion).unwrap();
+    let pubkey = b64.decode(topic.as_str())?;
+    let participant_id = *peer_id_db.get(&pubkey).unwrap();
     let participant_identifier = Identifier::try_from(participant_id)?;
-    let keys = key_db.get(onion).unwrap().clone();
+    let keys = key_db.get(&pubkey).unwrap().clone();
     let pubkey_package = keys.0;
     let key_package = keys.1;
     let share = key_package.signing_share();
@@ -51,10 +55,10 @@ pub async fn signer(
     let (nonces, commitments) = round1::commit(share, &mut rng);
 
     // send commitments to requester to generate SigningPackage
-    let send_message = (onion, participant_identifier, commitments);
-    let send_message = bincode::serialize(&send_message)?;
-    let send_message = b64.encode(send_message);
-    let send_message = format!("SIGNING_PACKAGE {}", send_message).as_bytes().to_vec();
+    let send_message =
+        bincode::serialize(
+            &(DirectMsgData::SigningPackage(topic.to_string(), participant_identifier, commitments)),
+        )?;
     direct_peer_msg.send((propagation_source, send_message))?;
 
     // wait for SigningPackage
@@ -79,10 +83,7 @@ pub async fn signer(
     let signature = round2::sign(&signing_package, &nonces, &key_package)?;
 
     // send signature to other participants
-    let send_message = (participant_identifier, signature);
-    let send_message = bincode::serialize(&send_message)?;
-    let send_message = b64.encode(send_message);
-    let send_message = format!("SIGN_FINAL {}", send_message).as_bytes().to_vec();
+    let send_message = bincode::serialize(&RequestData::SignFinal(participant_identifier, signature))?;
     peer_msg.send((topic.clone(), send_message))?;
 
     // wait for signatures
@@ -98,13 +99,11 @@ pub async fn signer(
             result = r3_sign_rx.recv() => {
                 let result = result?;
                 let (received_topic, participant_identifier, signature) = result;
-                if received_topic == topic {
-                    if !signing_package.signing_commitments().contains_key(&participant_identifier) {
-                        continue;
-                    }
+                if received_topic == topic &&
+                    signing_package.signing_commitments().contains_key(&participant_identifier) {
                     signature_db.insert(participant_identifier, signature);
                 }
-                if signature_db.len() > *MIN_SIGNERS as usize {
+                if signature_db.len() > min_signers as usize {
                     break;
                 }
             },
@@ -118,7 +117,6 @@ pub async fn signer(
                 break Ok(signature);
             },
             Err(frost::Error::InvalidSignatureShare { culprit }) => {
-                eprintln!("Removing invalid signature share {:?}", culprit);
                 signature_db.remove(&culprit);
             },
             Err(e) => {
@@ -127,14 +125,14 @@ pub async fn signer(
         }
     }?;
 
-    // print out the final signature
-    eprintln!("Final Signature: {:?}", final_signature);
-
     // verify the signature
     let signature_valid = pubkey_package.verifying_key().verify(&message, &final_signature).is_ok();
-    eprintln!("Signature Valid: {}", signature_valid);
+    if !signature_valid {
+        return Err(anyhow::anyhow!("Generated invalid signature"));
+    }
 
     // send the signature to the original sender
-    let _ = direct_peer_msg.send((propagation_source, format!("PRINT {:?}", final_signature).as_bytes().to_vec()));
+    let send_message = bincode::serialize(&(DirectMsgData::ReturnSign(final_signature.serialize().to_vec())))?;
+    let _ = direct_peer_msg.send((propagation_source, send_message));
     Ok(())
 }
