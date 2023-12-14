@@ -50,6 +50,8 @@ pub use libp2p::{
     swarm::SwarmEvent,
 };
 use once_cell::sync::Lazy;
+use rand::distributions::Alphanumeric;
+use rand::Rng;
 use serde::{
     Deserialize,
     Serialize,
@@ -65,12 +67,14 @@ mod gen;
 mod input;
 mod sign;
 
+type QueryId = String;
+
 pub trait Engine {
     fn new(max_signers: u16, min_signers: u16) -> Self;
     fn new_with_key(key: Keypair, max_signers: u16, min_signers: u16) -> Self;
     fn next(&mut self) -> BoxFuture<'_, Option<ClientOutput>>;
     fn add_peer(&mut self, peer: String, addr: String) -> Result<()>;
-    fn generate(&self) -> Result<()>;
+    fn generate(&self) -> Result<QueryId>;
     fn sign(&self, pubkey: Vec<u8>, message: Vec<u8>) -> Result<()>;
 }
 
@@ -111,10 +115,11 @@ impl Engine for Client {
         Ok(())
     }
 
-    fn generate(&self) -> Result<()> {
-        let send_message = ClientInput::Generate;
+    fn generate(&self) -> Result<QueryId> {
+        let query_id: QueryId = rand::thread_rng().sample_iter(&Alphanumeric).take(32).map(char::from).collect();
+        let send_message = ClientInput::Generate(query_id.clone());
         let _ = self.input_tx.send(send_message);
-        Ok(())
+        Ok(query_id)
     }
 
     fn sign(&self, pubkey: Vec<u8>, message: Vec<u8>) -> Result<()> {
@@ -168,7 +173,7 @@ impl From<request_response::Event<Vec<u8>, Vec<u8>>> for BehaviourEvent {
 #[derive(Debug)]
 pub enum ClientOutput {
     Error(String),
-    Generation(VerifyingKey),
+    Generation(QueryId, VerifyingKey),
     Signing(Signature),
     SwarmEvents(SwarmEvent<BehaviourEvent>),
 }
@@ -176,15 +181,15 @@ pub enum ClientOutput {
 #[derive(Debug)]
 enum ClientInput {
     AddPeer(String, String),
-    Generate,
+    Generate(QueryId),
     Sign(Vec<u8>, Vec<u8>),
 }
 
 #[derive(Deserialize, Serialize)]
 #[allow(clippy::large_enum_variant)]
 enum DirectMsgData {
-    GenStart(String, u16),
-    ReturnGen(Vec<u8>),
+    GenStart(QueryId, u16),
+    ReturnGen(QueryId, Vec<u8>),
     ReturnSign(Vec<u8>),
     SigningPackage(String, Identifier, SigningCommitments),
 }
@@ -267,15 +272,17 @@ async fn run(
                             let kademlia = &mut swarm.behaviour_mut().kad;
                             input::add_peer(peer, addr, kademlia).await?;
                         },
-                        ClientInput::Generate => {
+                        ClientInput::Generate(query_id) => {
                             let closest_peer_rx = closest_peer_tx.subscribe();
                             let direct_peer_msg = direct_peer_msg.clone();
                             let output = output.clone();
                             let peer_msg = peer_msg.clone();
-                            let query_id = swarm.behaviour_mut().kad.get_closest_peers(PeerId::random());
+                            let closest_peers_query_id =
+                                swarm.behaviour_mut().kad.get_closest_peers(PeerId::random());
                             let subscribed_rx = subscribed_tx.subscribe();
                             tokio::spawn(async move {
                                 input::generate(
+                                    closest_peers_query_id,
                                     direct_peer_msg,
                                     max_signers,
                                     closest_peer_rx,
@@ -343,10 +350,11 @@ async fn run(
                                     peer_id_db.insert(generation_id.into_bytes(), participant_id);
                                 },
                                 // return data
-                                DirectMsgData::ReturnGen(key) => {
+                                DirectMsgData::ReturnGen(query_id, key) => {
                                     let _ =
                                         output.send(
                                             ClientOutput::Generation(
+                                                query_id,
                                                 VerifyingKey::deserialize(key.try_into().unwrap())?,
                                             ),
                                         );
@@ -421,13 +429,13 @@ async fn run(
                                                                 return;
                                                             },
                                                         };
-                                                    let topic = b64.encode(&response);
+                                                    let new_topic = b64.encode(&response);
                                                     let send_message =
                                                         bincode::serialize(
-                                                            &DirectMsgData::ReturnGen(response),
+                                                            &DirectMsgData::ReturnGen(topic.to_string(), response),
                                                         ).unwrap();
                                                     let _ = direct_peer_msg.send((propagation_source, send_message));
-                                                    let _ = subscribe_tx.send(IdentTopic::new(topic));
+                                                    let _ = subscribe_tx.send(IdentTopic::new(new_topic));
                                                 });
                                             },
                                             // Key Generation Round 2

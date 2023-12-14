@@ -1,5 +1,6 @@
 use crate::{
     DirectMsgData,
+    QueryId,
     RequestData,
 };
 use anyhow::Result;
@@ -18,14 +19,11 @@ use libp2p::{
         store::MemoryStore,
         Behaviour as Kademlia,
         GetClosestPeersOk,
-        QueryId,
+        QueryId as KademliaQueryId,
     },
     PeerId,
 };
-use rand::{
-    distributions::Alphanumeric,
-    Rng,
-};
+use rand::Rng;
 use std::collections::BTreeMap;
 use tokio::select;
 
@@ -38,16 +36,14 @@ pub async fn add_peer(peer: String, addr: String, kademlia: &mut Kademlia<Memory
 }
 
 pub async fn generate(
+    closest_peers_query_id: KademliaQueryId,
     direct_peer_msg: tokio::sync::mpsc::UnboundedSender<(PeerId, Vec<u8>)>,
     max_signers: u16,
-    mut closest_peer_rx: tokio::sync::broadcast::Receiver<(QueryId, GetClosestPeersOk)>,
+    mut closest_peer_rx: tokio::sync::broadcast::Receiver<(KademliaQueryId, GetClosestPeersOk)>,
     mut subscribed_rx: tokio::sync::broadcast::Receiver<(TopicHash, PeerId)>,
     peer_msg: tokio::sync::mpsc::UnboundedSender<(TopicHash, Vec<u8>)>,
     query_id: QueryId,
 ) -> Result<()> {
-    // generate random generation id
-    let generation_id: String = rand::thread_rng().sample_iter(&Alphanumeric).take(32).map(char::from).collect();
-
     // wait for response
     let timer = tokio::time::sleep(tokio::time::Duration::from_secs(30));
     tokio::pin!(timer);
@@ -58,7 +54,7 @@ pub async fn generate(
             },
             result = closest_peer_rx.recv() => {
                 let (received_query_id, ok) = result?;
-                if received_query_id == query_id {
+                if received_query_id == closest_peers_query_id {
                     break ok;
                 }
             },
@@ -75,7 +71,7 @@ pub async fn generate(
     // send messages to peers
     for count in 1 ..= peer_map.len() {
         let peer = peer_map.get(count - 1).unwrap();
-        let send_message = bincode::serialize(&(DirectMsgData::GenStart(generation_id.clone(), count as u16)))?;
+        let send_message = bincode::serialize(&(DirectMsgData::GenStart(query_id.clone(), count as u16)))?;
 
         // Initialize Generation
         let _ = direct_peer_msg.send((peer.parse()?, send_message));
@@ -93,7 +89,7 @@ pub async fn generate(
             result = subscribed_rx.recv() => {
                 let result = result?;
                 let (topic, peer) = result;
-                if topic.as_str() == generation_id {
+                if topic.as_str() == query_id {
                     responses.push(peer);
                 }
                 if responses.len() >= max_signers as usize {
@@ -112,7 +108,7 @@ pub async fn generate(
 
     // send message to peers
     let send_message = bincode::serialize(&RequestData::GenR1)?;
-    let _ = peer_msg.send((TopicHash::from_raw(&generation_id), send_message));
+    let _ = peer_msg.send((TopicHash::from_raw(&query_id), send_message));
     Ok(())
 }
 

@@ -58,12 +58,12 @@ async fn main() -> Result<()> {
             recv = client.next() => {
                 let recv = recv.unwrap();
                 match recv {
-                    ClientOutput::Generation(pubkey) => {
+                    ClientOutput::Generation(_, pubkey) => {
                         println!("Generated Key: {}", b64.encode(pubkey.serialize()));
                         println!("Onion Address: {}", onion_address(pubkey.serialize().to_vec()));
                     },
-                    ClientOutput::Signing(message) => {
-                        println!("Signed Message: {:?}", message);
+                    ClientOutput::Signing(signature) => {
+                        println!("Signature: {:?}", signature);
                     },
                     ClientOutput::SwarmEvents(event) => {
                         match event {
