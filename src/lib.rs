@@ -9,8 +9,10 @@ use frost_ed25519::{
     round1::SigningCommitments,
     round2,
     Identifier,
-    Signature,
     SigningPackage,
+};
+pub use frost_ed25519::{
+    Signature,
     VerifyingKey,
 };
 use futures::{
@@ -75,7 +77,7 @@ pub trait Engine {
     fn next(&mut self) -> BoxFuture<'_, Option<ClientOutput>>;
     fn add_peer(&mut self, peer: String, addr: String) -> Result<()>;
     fn generate(&self) -> Result<QueryId>;
-    fn sign(&self, pubkey: Vec<u8>, message: Vec<u8>) -> Result<()>;
+    fn sign(&self, pubkey: Vec<u8>, message: Vec<u8>) -> Result<QueryId>;
 }
 
 pub struct Client {
@@ -122,10 +124,11 @@ impl Engine for Client {
         Ok(query_id)
     }
 
-    fn sign(&self, pubkey: Vec<u8>, message: Vec<u8>) -> Result<()> {
-        let send_message = ClientInput::Sign(pubkey, message);
+    fn sign(&self, pubkey: Vec<u8>, message: Vec<u8>) -> Result<QueryId> {
+        let query_id: QueryId = rand::thread_rng().sample_iter(&Alphanumeric).take(32).map(char::from).collect();
+        let send_message = ClientInput::Sign(query_id.clone(), pubkey, message);
         let _ = self.input_tx.send(send_message);
-        Ok(())
+        Ok(query_id)
     }
 }
 
@@ -174,7 +177,7 @@ impl From<request_response::Event<Vec<u8>, Vec<u8>>> for BehaviourEvent {
 pub enum ClientOutput {
     Error(String),
     Generation(QueryId, VerifyingKey),
-    Signing(Signature),
+    Signing(QueryId, Signature),
     SwarmEvents(SwarmEvent<BehaviourEvent>),
 }
 
@@ -182,7 +185,7 @@ pub enum ClientOutput {
 enum ClientInput {
     AddPeer(String, String),
     Generate(QueryId),
-    Sign(Vec<u8>, Vec<u8>),
+    Sign(QueryId, Vec<u8>, Vec<u8>),
 }
 
 #[derive(Deserialize, Serialize)]
@@ -190,7 +193,7 @@ enum ClientInput {
 enum DirectMsgData {
     GenStart(QueryId, u16),
     ReturnGen(QueryId, Vec<u8>),
-    ReturnSign(Vec<u8>),
+    ReturnSign(QueryId, Vec<u8>),
     SigningPackage(String, Identifier, SigningCommitments),
 }
 
@@ -199,7 +202,7 @@ enum RequestData {
     GenR1,
     GenR2(Identifier, dkg::round1::Package),
     GenFinal(Identifier, BTreeMap<Identifier, dkg::round2::Package>),
-    SignR1(Vec<u8>),
+    SignR1(QueryId, Vec<u8>),
     SignR2(Vec<u8>),
     SignFinal(Identifier, round2::SignatureShare),
 }
@@ -296,12 +299,12 @@ async fn run(
                                     });
                             });
                         },
-                        ClientInput::Sign(pubkey, message) => {
+                        ClientInput::Sign(query_id, pubkey, message) => {
                             let output = output.clone();
                             let peer_msg = peer_msg.clone();
                             let signing_package_rx = signing_package_tx.subscribe();
                             tokio::spawn(async move {
-                                input::sign(message, min_signers, signing_package_rx, peer_msg, pubkey)
+                                input::sign(message, min_signers, signing_package_rx, peer_msg, pubkey, query_id)
                                     .await
                                     .unwrap_or_else(|e| {
                                         let _ = output.send(ClientOutput::Error(format!("{}", e)));
@@ -359,10 +362,11 @@ async fn run(
                                             ),
                                         );
                                 },
-                                DirectMsgData::ReturnSign(signature) => {
+                                DirectMsgData::ReturnSign(query_id, signature) => {
                                     let _ =
                                         output.send(
                                             ClientOutput::Signing(
+                                                query_id,
                                                 Signature::deserialize(signature.try_into().unwrap())?,
                                             ),
                                         );
@@ -447,7 +451,7 @@ async fn run(
                                                 let _ = r3_gen_tx.send((topic, identifier, packages));
                                             },
                                             // Signing Round 1
-                                            RequestData::SignR1(data) => {
+                                            RequestData::SignR1(query_id, data) => {
                                                 let direct_peer_msg = direct_peer_msg.clone();
                                                 let key_db = key_db.clone();
                                                 let output = output.clone();
@@ -466,6 +470,7 @@ async fn run(
                                                         peer_id_db,
                                                         peer_msg,
                                                         propagation_source,
+                                                        query_id,
                                                         topic,
                                                     )
                                                         .await

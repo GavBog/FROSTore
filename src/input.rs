@@ -118,10 +118,11 @@ pub async fn sign(
     mut signing_package_rx: tokio::sync::broadcast::Receiver<(TopicHash, Identifier, round1::SigningCommitments)>,
     peer_msg: tokio::sync::mpsc::UnboundedSender<(TopicHash, Vec<u8>)>,
     pubkey: Vec<u8>,
+    query_id: QueryId,
 ) -> Result<()> {
     // send the message to the other participants to begin the signing process
     let topic = TopicHash::from_raw(b64.encode(pubkey));
-    let send_message = bincode::serialize(&RequestData::SignR1(message.clone()))?;
+    let send_message = bincode::serialize(&RequestData::SignR1(query_id, message.clone()))?;
     let _ = peer_msg.send((topic.clone(), send_message));
 
     // await commitments and generate signing package

@@ -1,5 +1,6 @@
 use crate::{
     DirectMsgData,
+    QueryId,
     RequestData,
 };
 use anyhow::Result;
@@ -40,6 +41,7 @@ pub async fn signer(
     peer_id_db: Arc<DashMap<Vec<u8>, u16>>,
     peer_msg: tokio::sync::mpsc::UnboundedSender<(TopicHash, Vec<u8>)>,
     propagation_source: PeerId,
+    query_id: QueryId,
     topic: TopicHash,
 ) -> Result<()> {
     let pubkey = b64.decode(topic.as_str())?;
@@ -132,7 +134,7 @@ pub async fn signer(
     }
 
     // send the signature to the original sender
-    let send_message = bincode::serialize(&(DirectMsgData::ReturnSign(final_signature.serialize().to_vec())))?;
+    let send_message = bincode::serialize(&(DirectMsgData::ReturnSign(query_id, final_signature.serialize().to_vec())))?;
     let _ = direct_peer_msg.send((propagation_source, send_message));
     Ok(())
 }

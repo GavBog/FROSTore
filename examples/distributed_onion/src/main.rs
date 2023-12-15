@@ -10,11 +10,13 @@ use frostore::{
     Engine,
     Keypair,
     SwarmEvent,
+    VerifyingKey,
 };
 use sha3::{
     Digest,
     Sha3_256,
 };
+use std::collections::HashMap;
 use tokio::{
     io::AsyncBufReadExt,
     select,
@@ -23,6 +25,7 @@ use tokio::{
 #[tokio::main]
 async fn main() -> Result<()> {
     let key = Keypair::generate_ed25519();
+    let mut request_db = HashMap::new();
     let mut client = Client::new_with_key(key.clone(), 5, 3);
     let mut stdin = tokio::io::BufReader::new(tokio::io::stdin()).lines();
     loop {
@@ -47,8 +50,9 @@ async fn main() -> Result<()> {
                         let pubkey = args.next().unwrap().to_string();
                         let pubkey = b64.decode(pubkey.as_bytes())?;
                         let message = args.collect::<Vec<_>>().join(" ").into_bytes();
-                        client.sign(pubkey, message)?;
-                        eprintln!("Beginning signing");
+                        let id = client.sign(pubkey.clone(), message.clone())?;
+                        request_db.insert(id, (pubkey, message));
+                        eprintln!("Signing message!");
                     },
                     _ => {
                         eprintln!("Unknown command");
@@ -62,8 +66,13 @@ async fn main() -> Result<()> {
                         println!("Generated Key: {}", b64.encode(pubkey.serialize()));
                         println!("Onion Address: {}", onion_address(pubkey.serialize().to_vec()));
                     },
-                    ClientOutput::Signing(signature) => {
+                    ClientOutput::Signing(id, signature) => {
+                        let (pubkey, message) = request_db.get(&id).unwrap();
+                        println!("Message: {}", String::from_utf8_lossy(message));
                         println!("Signature: {:?}", signature);
+                        let pubkey = VerifyingKey::deserialize(pubkey.clone().try_into().unwrap())?;
+                        let valid = pubkey.verify(message, &signature).is_ok();
+                        println!("Signature Valid: {}", valid);
                     },
                     ClientOutput::SwarmEvents(event) => {
                         match event {
