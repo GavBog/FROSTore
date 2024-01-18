@@ -2,7 +2,7 @@
 name = "frostore"
 description = "Schnorr Threshold Signature Database"
 repository = "https://github.com/GavBog/FROSTore"
-version = "0.1.1"
+version = "0.1.2"
 license = "GPL-3.0"
 edition = "2021"
 
@@ -13,8 +13,14 @@ bincode = "1"
 dashmap = "5"
 frost-ed25519 = "1.0.0-rc.0"
 futures = "0.3"
-libp2p = { version = "0.53", features = ["cbor", "gossipsub", "identify", "kad", "macros", "noise", "quic", "request-response", "tcp", "tokio", "yamux"] }
+libp2p = { version = "0.53", features = ["async-std", "cbor", "gossipsub", "identify", "kad", "macros", "noise", "quic", "request-response", "tcp", "yamux"] }
 once_cell = "1"
 rand = "0.8"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["full"], optional = true }
 serde = { version = "1", features = ["derive"] }
+async-std = { version = "1", optional = true }
+
+[features]
+default = []
+async-std = ["dep:async-std"]
+tokio = ["dep:tokio", "libp2p/tokio"]

@@ -1,14 +1,10 @@
 [package]
-name = "distributed_onion"
+name = "basic_signature"
 version = "0.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-anyhow = "1"
-base64 = "0.21.5"
-data-encoding = "2.5.0"
 frostore = { path = "../..", features = ["tokio"] }
-sha3 = "0.10.8"
 tokio = { version = "1", features = ["full"] }
