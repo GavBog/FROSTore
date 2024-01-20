@@ -1,6 +1,5 @@
 use std::{collections::BTreeMap, sync::Arc};
 
-use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD_NO_PAD as b64, Engine as Base64Engine};
 use dashmap::{mapref::one::RefMut, DashMap};
 use frost_ed25519::{
@@ -14,6 +13,7 @@ use libp2p::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::swarm::SwarmError;
 use crate::{
     input::ReqGenerate, Behaviour, DbData, DirectMsgData, MessageData, QueryId, SignerConfig,
     SwarmOutput,
@@ -59,7 +59,7 @@ impl Generator {
         &mut self,
         swarm: &mut Libp2pSwarm<Behaviour>,
         propagation_source: PeerId,
-    ) -> Result<()> {
+    ) -> Result<(), SwarmError> {
         self.propagation_source = Some(propagation_source);
         let rng = rand::rngs::OsRng;
         let (round1_secret_package, round1_package) = dkg::part1(
@@ -67,12 +67,14 @@ impl Generator {
             self.signer_config.max_signers,
             self.signer_config.min_signers,
             rng,
-        )?;
+        )
+        .map_err(|_| SwarmError::GenerationError)?;
         self.round1_secret_package = Some(round1_secret_package);
         let send_message = bincode::serialize(&MessageData::Generation(GenerationMessage::GenR2(
             self.identifier,
             Box::new(round1_package),
-        )))?;
+        )))
+        .map_err(|_| SwarmError::MessageProcessingError)?;
         let _ = swarm
             .behaviour_mut()
             .gossipsub
@@ -84,19 +86,24 @@ impl Generator {
         &mut self,
         identifier: Identifier,
         round1_package: dkg::round1::Package,
-    ) -> Result<usize> {
+    ) -> Result<usize, SwarmError> {
         self.round1_packages.insert(identifier, round1_package);
         Ok(self.round1_packages.len())
     }
 
-    pub(crate) fn gen_r2(&mut self, swarm: &mut Libp2pSwarm<Behaviour>) -> Result<()> {
-        let round1_secret_package = self.round1_secret_package.clone().unwrap();
+    pub(crate) fn gen_r2(&mut self, swarm: &mut Libp2pSwarm<Behaviour>) -> Result<(), SwarmError> {
+        let round1_secret_package = self
+            .round1_secret_package
+            .clone()
+            .ok_or(SwarmError::DatabaseError)?;
         let (round2_secret_package, round2_packages) =
-            dkg::part2(round1_secret_package, &self.round1_packages)?;
+            dkg::part2(round1_secret_package, &self.round1_packages)
+                .map_err(|_| SwarmError::GenerationError)?;
         self.round2_secret_package = Some(round2_secret_package);
         let send_message = bincode::serialize(&MessageData::Generation(
             GenerationMessage::GenFinal(self.identifier, round2_packages),
-        ))?;
+        ))
+        .map_err(|_| SwarmError::MessageProcessingError)?;
         let _ = swarm
             .behaviour_mut()
             .gossipsub
@@ -108,23 +115,21 @@ impl Generator {
         &mut self,
         identifier: Identifier,
         round2_package: dkg::round2::Package,
-    ) -> Result<usize> {
+    ) -> Result<usize, SwarmError> {
         self.round2_packages.insert(identifier, round2_package);
         Ok(self.round2_packages.len())
     }
 
-    pub(crate) fn gen_final(&self) -> Result<(PublicKeyPackage, KeyPackage)> {
-        let round2_secret_package = if let Some(round2_secret_package) = &self.round2_secret_package
-        {
-            round2_secret_package
-        } else {
-            return Err(anyhow::anyhow!("Round 2 secret package not found"));
-        };
+    pub(crate) fn gen_final(&self) -> Result<(PublicKeyPackage, KeyPackage), SwarmError> {
         let (key_package, pubkey_package) = dkg::part3(
-            round2_secret_package,
+            &self
+                .round2_secret_package
+                .clone()
+                .ok_or(SwarmError::DatabaseError)?,
             &self.round1_packages,
             &self.round2_packages,
-        )?;
+        )
+        .map_err(|_| SwarmError::GenerationError)?;
         Ok((pubkey_package, key_package))
     }
 }
@@ -135,10 +140,10 @@ pub(crate) fn gen_start(
     query_id: QueryId,
     signer_config: SignerConfig,
     participant_id: u16,
-) -> Result<()> {
+) -> Result<(), SwarmError> {
     let _ = swarm.behaviour_mut().kad.bootstrap();
     let generator = Generator::new(
-        Identifier::try_from(participant_id)?,
+        Identifier::try_from(participant_id).map_err(|_| SwarmError::MessageProcessingError)?,
         signer_config.clone(),
         TopicHash::from_raw(&query_id),
     );
@@ -157,8 +162,10 @@ pub(crate) fn handle_generation_msg(
     message: GenerationMessage,
     propagation_source: PeerId,
     topic: TopicHash,
-) -> Result<()> {
-    let generator = generator_db.get_mut(&topic.to_string()).unwrap();
+) -> Result<(), SwarmError> {
+    let generator = generator_db
+        .get_mut(&topic.to_string())
+        .ok_or(SwarmError::DatabaseError)?;
     match message {
         GenerationMessage::GenR1 => handle_r1_generation(swarm, generator, propagation_source)?,
         GenerationMessage::GenR2(identifier, package) => {
@@ -175,7 +182,7 @@ fn handle_r1_generation(
     swarm: &mut Libp2pSwarm<Behaviour>,
     mut generator: RefMut<QueryId, Generator>,
     propagation_source: PeerId,
-) -> Result<()> {
+) -> Result<(), SwarmError> {
     generator.gen_r1(swarm, propagation_source)?;
     Ok(())
 }
@@ -185,7 +192,7 @@ fn handle_r2_generation(
     mut generator: RefMut<QueryId, Generator>,
     identifier: Identifier,
     package: dkg::round1::Package,
-) -> Result<()> {
+) -> Result<(), SwarmError> {
     let db_length = generator.insert_r1(identifier, package)?;
     if db_length + 1 >= generator.signer_config.max_signers as usize {
         generator.gen_r2(swarm)?;
@@ -199,8 +206,10 @@ fn handle_final_generation(
     mut generator: RefMut<QueryId, Generator>,
     received_identifier: Identifier,
     mut packages: BTreeMap<Identifier, dkg::round2::Package>,
-) -> Result<()> {
-    let round2_package = packages.remove(&generator.identifier).unwrap();
+) -> Result<(), SwarmError> {
+    let round2_package = packages
+        .remove(&generator.identifier)
+        .ok_or(SwarmError::DatabaseError)?;
     let db_length = generator.insert_r2(received_identifier, round2_package)?;
     if db_length + 1 >= generator.signer_config.max_signers as usize {
         let (pubkey_package, key_package) = generator.gen_final()?;
@@ -229,7 +238,7 @@ pub(crate) fn send_final_gen(
     database: Arc<DashMap<Vec<u8>, DbData>>,
     query_id: QueryId,
     pubkey_package: PublicKeyPackage,
-) -> Result<()> {
+) -> Result<(), SwarmError> {
     let _ = output.start_send(SwarmOutput::Generation(
         query_id.clone(),
         *pubkey_package.verifying_key(),
@@ -237,7 +246,10 @@ pub(crate) fn send_final_gen(
     if !generation_requester_db.contains_key(&query_id) {
         return Ok(());
     }
-    let generation_requester = generation_requester_db.remove(&query_id).unwrap().1;
+    let generation_requester = generation_requester_db
+        .remove(&query_id)
+        .ok_or(SwarmError::DatabaseError)?
+        .1;
     database.insert(
         pubkey_package.verifying_key().serialize().to_vec(),
         DbData {
@@ -255,9 +267,11 @@ fn return_gen(
     swarm: &mut Libp2pSwarm<Behaviour>,
     generator: &mut Generator,
     pubkey_package: PublicKeyPackage,
-) -> Result<()> {
+) -> Result<(), SwarmError> {
     let _ = swarm.behaviour_mut().req_res.send_request(
-        &generator.propagation_source.unwrap(),
+        &generator
+            .propagation_source
+            .ok_or(SwarmError::DatabaseError)?,
         DirectMsgData::ReturnGen(generator.topic.to_string(), pubkey_package),
     );
     Ok(())

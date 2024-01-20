@@ -21,17 +21,33 @@ use libp2p::{
     tcp, yamux, Multiaddr, Swarm as Libp2pSwarm, Transport,
 };
 use rand::{distributions::Alphanumeric, Rng};
+use thiserror::Error;
 
 use crate::{
     start_swarm, utils::PROTOCOL_VERSION, DirectMsgData, Executor, Keypair, QueryId, SignerConfig,
 };
 
-#[derive(Debug)]
-pub enum SwarmOutput {
-    Error(String),
-    Generation(QueryId, VerifyingKey),
-    Signing(QueryId, Signature),
-    SwarmEvents(SwarmEvent<BehaviourEvent>),
+#[derive(Error, Debug)]
+pub enum SwarmError {
+    // Task related errors
+    #[error("Generation Error")]
+    GenerationError,
+    #[error("Signing Error")]
+    SigningError,
+    #[error("Produced a signature that is invalid")]
+    InvalidSignature,
+
+    // Data handling errors
+    #[error("Configuration error")]
+    ConfigurationError,
+    #[error("Message processing error")]
+    MessageProcessingError,
+    #[error("Database error")]
+    DatabaseError,
+
+    // Network related errors
+    #[error("Invalid peer responded")]
+    InvalidPeer,
 }
 
 #[derive(Debug)]
@@ -39,6 +55,14 @@ pub enum SwarmInput {
     AddPeer(Multiaddr),
     Generate(QueryId, SignerConfig, oneshot::Sender<VerifyingKey>),
     Sign(QueryId, oneshot::Sender<Signature>, Vec<u8>, Vec<u8>),
+}
+
+#[derive(Debug)]
+pub enum SwarmOutput {
+    Error(SwarmError),
+    Generation(QueryId, VerifyingKey),
+    Signing(QueryId, Signature),
+    SwarmEvents(SwarmEvent<BehaviourEvent>),
 }
 
 #[derive(NetworkBehaviour)]
@@ -91,15 +115,16 @@ pub struct Swarm {
 }
 
 impl Swarm {
-    pub fn exec(&mut self) {
+    pub fn exec(&mut self) -> Result<(), SwarmError> {
         let (input_tx, input_rx) = mpsc::unbounded::<SwarmInput>();
         let (output_tx, output_rx) = mpsc::unbounded::<SwarmOutput>();
         self.input_tx = Some(input_tx);
         self.output_rx = Some(output_rx);
-        let swarm = create_libp2p_swarm(self).unwrap();
+        let swarm = create_libp2p_swarm(self)?;
         self.executor.exec(Box::pin(async move {
             let _ = start_swarm(input_rx, output_tx, swarm).await;
         }));
+        Ok(())
     }
 
     #[allow(clippy::should_implement_trait)]
@@ -107,7 +132,7 @@ impl Swarm {
         Box::pin(self.output_rx.as_mut().unwrap().next())
     }
 
-    pub fn add_peer(&mut self, multiaddr: Multiaddr) -> anyhow::Result<()> {
+    pub fn add_peer(&mut self, multiaddr: Multiaddr) -> Result<(), SwarmError> {
         let send_message = SwarmInput::AddPeer(multiaddr);
         let _ = self.input_tx.as_mut().unwrap().start_send(send_message);
         Ok(())
@@ -117,7 +142,7 @@ impl Swarm {
         &mut self,
         min_threshold: u16,
         total_peers: u16,
-    ) -> (QueryId, BoxFuture<'_, anyhow::Result<VerifyingKey>>) {
+    ) -> (QueryId, BoxFuture<'_, Result<VerifyingKey, SwarmError>>) {
         let (tx, rx) = oneshot::channel::<VerifyingKey>();
         let query_id = rand::thread_rng()
             .sample_iter(&Alphanumeric)
@@ -136,7 +161,7 @@ impl Swarm {
         (
             query_id,
             Box::pin(async move {
-                let response = rx.await?;
+                let response = rx.await.map_err(|_| SwarmError::MessageProcessingError)?;
                 Ok(response)
             }),
         )
@@ -146,7 +171,7 @@ impl Swarm {
         &mut self,
         pubkey: VerifyingKey,
         message: Vec<u8>,
-    ) -> (QueryId, BoxFuture<'_, anyhow::Result<Signature>>) {
+    ) -> (QueryId, BoxFuture<'_, Result<Signature, SwarmError>>) {
         let (tx, rx) = oneshot::channel::<Signature>();
         let query_id = rand::thread_rng()
             .sample_iter(&Alphanumeric)
@@ -159,20 +184,20 @@ impl Swarm {
         (
             query_id,
             Box::pin(async move {
-                let response = rx.await?;
+                let response = rx.await.map_err(|_| SwarmError::MessageProcessingError)?;
                 Ok(response)
             }),
         )
     }
 }
 
-fn create_libp2p_swarm(config: &Swarm) -> anyhow::Result<Libp2pSwarm<Behaviour>> {
+fn create_libp2p_swarm(config: &Swarm) -> Result<Libp2pSwarm<Behaviour>, SwarmError> {
     let behavior = Behaviour {
         gossipsub: gossipsub::Behaviour::new(
             gossipsub::MessageAuthenticity::Signed(config.key.clone()),
             gossipsub::ConfigBuilder::default().build().unwrap(),
         )
-        .unwrap(),
+        .map_err(|_| SwarmError::ConfigurationError)?,
         identify: identify::Behaviour::new(identify::Config::new(
             PROTOCOL_VERSION.clone(),
             config.key.public(),
@@ -197,7 +222,9 @@ fn create_libp2p_swarm(config: &Swarm) -> anyhow::Result<Libp2pSwarm<Behaviour>>
 
     let transport = transport
         .upgrade(Version::V1Lazy)
-        .authenticate(noise::Config::new(&config.key.clone()).unwrap())
+        .authenticate(
+            noise::Config::new(&config.key.clone()).map_err(|_| SwarmError::ConfigurationError)?,
+        )
         .multiplex(yamux::Config::default())
         .boxed();
 

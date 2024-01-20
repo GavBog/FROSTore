@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use anyhow::Result;
 use dashmap::DashMap;
 use frost_ed25519::{
     keys::{KeyPackage, PublicKeyPackage},
@@ -25,6 +24,7 @@ pub use libp2p::{
 use serde::{Deserialize, Serialize};
 
 pub use crate::builder::Builder;
+use crate::swarm::SwarmError;
 use crate::{
     gen::{gen_start, send_final_gen, GenerationMessage, Generator},
     input::{ReqGenerate, ReqSign},
@@ -73,7 +73,7 @@ async fn start_swarm(
     mut input: mpsc::UnboundedReceiver<SwarmInput>,
     output: UnboundedSender<SwarmOutput>,
     mut swarm: Libp2pSwarm<Behaviour>,
-) -> Result<()> {
+) -> Result<(), SwarmError> {
     let generation_requester_db = Arc::new(DashMap::<QueryId, ReqGenerate>::new());
     let generator_db = Arc::new(DashMap::<QueryId, Generator>::new());
     let signer_db = Arc::new(DashMap::<QueryId, Signer>::new());
@@ -83,7 +83,7 @@ async fn start_swarm(
     // HANDLE INPUT FROM CLIENT
     let handle_client_input = |input: SwarmInput,
                                swarm: &mut Libp2pSwarm<Behaviour>|
-     -> Result<()> {
+     -> Result<(), SwarmError> {
         match input {
             SwarmInput::AddPeer(peer_address) => input::handle_add_peer_input(peer_address, swarm)?,
             SwarmInput::Generate(req_id, signer_conf, resp_channel) => {
@@ -109,43 +109,46 @@ async fn start_swarm(
     };
 
     // HANDLE EVENTS FROM SWARM
-    let handle_gossipsub_message =
-        |message: gossipsub::Message, swarm: &mut Libp2pSwarm<Behaviour>| -> Result<()> {
-            let message_data = bincode::deserialize::<MessageData>(&message.data)?;
-            match message_data {
-                MessageData::Generation(genmessage) => {
-                    gen::handle_generation_msg(
-                        database.clone(),
-                        swarm,
-                        generator_db.clone(),
-                        genmessage,
-                        message.source.unwrap(),
-                        message.topic,
-                    )?;
-                }
-                MessageData::Signing(signmessage) => {
-                    sign::handle_signing_msg(
-                        database.clone(),
-                        swarm,
-                        signer_db.clone(),
-                        signmessage,
-                        message.source.unwrap(),
-                        message.topic,
-                    )?;
-                }
+    let handle_gossipsub_message = |message: gossipsub::Message,
+                                    swarm: &mut Libp2pSwarm<Behaviour>|
+     -> Result<(), SwarmError> {
+        let message_data = bincode::deserialize::<MessageData>(&message.data)
+            .map_err(|_| SwarmError::MessageProcessingError)?;
+        match message_data {
+            MessageData::Generation(genmessage) => {
+                gen::handle_generation_msg(
+                    database.clone(),
+                    swarm,
+                    generator_db.clone(),
+                    genmessage,
+                    message.source.ok_or(SwarmError::MessageProcessingError)?,
+                    message.topic,
+                )?;
             }
-            Ok(())
-        };
+            MessageData::Signing(signmessage) => {
+                sign::handle_signing_msg(
+                    database.clone(),
+                    swarm,
+                    signer_db.clone(),
+                    signmessage,
+                    message.source.ok_or(SwarmError::MessageProcessingError)?,
+                    message.topic,
+                )?;
+            }
+        }
+        Ok(())
+    };
     let handle_gossipsub_event =
-        |event: GossipsubEvent, swarm: &mut Libp2pSwarm<Behaviour>| -> Result<()> {
+        |event: GossipsubEvent, swarm: &mut Libp2pSwarm<Behaviour>| -> Result<(), SwarmError> {
             match event {
                 GossipsubEvent::Message { message, .. } => {
                     handle_gossipsub_message(message, swarm)?;
                 }
                 GossipsubEvent::Subscribed { topic, peer_id } => {
                     if generation_requester_db.contains_key(&topic.to_string()) {
-                        let mut generation_requester =
-                            generation_requester_db.get_mut(&topic.to_string()).unwrap();
+                        let mut generation_requester = generation_requester_db
+                            .get_mut(&topic.to_string())
+                            .ok_or(SwarmError::DatabaseError)?;
                         let count = generation_requester.insert_response(peer_id)?;
                         if count >= generation_requester.signer_config.max_signers as usize {
                             generation_requester.gen_r2(swarm)?;
@@ -160,7 +163,7 @@ async fn start_swarm(
     let handle_request_event = |message: DirectMsgData,
                                 _channel: ResponseChannel<Vec<u8>>,
                                 swarm: &mut Libp2pSwarm<Behaviour>|
-     -> Result<()> {
+     -> Result<(), SwarmError> {
         match message {
             DirectMsgData::GenStart(query_id, signer_config, participant_id) => {
                 gen_start(
@@ -196,7 +199,7 @@ async fn start_swarm(
         Ok(())
     };
     let handle_behavior_event =
-        |event: BehaviourEvent, swarm: &mut Libp2pSwarm<Behaviour>| -> Result<()> {
+        |event: BehaviourEvent, swarm: &mut Libp2pSwarm<Behaviour>| -> Result<(), SwarmError> {
             match event {
                 BehaviourEvent::Gossipsub(event) => {
                     handle_gossipsub_event(event, swarm)?;
@@ -225,31 +228,38 @@ async fn start_swarm(
             }
             Ok(())
         };
-    let handle_event =
-        |event: SwarmEvent<BehaviourEvent>, swarm: &mut Libp2pSwarm<Behaviour>| -> Result<()> {
-            match event {
-                SwarmEvent::Behaviour(event) => {
-                    handle_behavior_event(event, swarm)?;
-                }
-                _ => {
-                    let mut output = output.clone();
-                    let _ = output.start_send(SwarmOutput::SwarmEvents(event));
-                }
+    let handle_event = |event: SwarmEvent<BehaviourEvent>,
+                        swarm: &mut Libp2pSwarm<Behaviour>|
+     -> Result<(), SwarmError> {
+        match event {
+            SwarmEvent::Behaviour(event) => {
+                handle_behavior_event(event, swarm)?;
             }
-            Ok(())
-        };
+            _ => {
+                let mut output = output.clone();
+                let _ = output.start_send(SwarmOutput::SwarmEvents(event));
+            }
+        }
+        Ok(())
+    };
 
     // BEGIN MAIN LOOP
     loop {
         select! {
             recv = input.next().fuse() => {
                 if let Some(recv) = recv {
-                    handle_client_input(recv, &mut swarm)?;
+                    handle_client_input(recv, &mut swarm).unwrap_or_else(|e| {
+                        let mut output = output.clone();
+                        let _ = output.start_send(SwarmOutput::Error(e));
+                    });
                 }
             },
             event = swarm.next().fuse() => {
                 if let Some(event) = event {
-                    handle_event(event, &mut swarm)?;
+                    handle_event(event, &mut swarm).unwrap_or_else(|e| {
+                        let mut output = output.clone();
+                        let _ = output.start_send(SwarmOutput::Error(e));
+                    });
                 }
             },
         }

@@ -1046,7 +1046,6 @@ dependencies = [
 name = "frostore"
 version = "0.1.2"
 dependencies = [
- "anyhow",
  "base64",
  "bincode",
  "dashmap",
@@ -1056,6 +1055,7 @@ dependencies = [
  "once_cell",
  "rand",
  "serde",
+    "thiserror",
  "tokio",
 ]
 

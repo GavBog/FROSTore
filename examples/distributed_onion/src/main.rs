@@ -20,7 +20,7 @@ async fn main() -> Result<()> {
     let mut swarm = Builder::new().build();
 
     // Start the swarm network in the background
-    swarm.exec();
+    swarm.exec()?;
 
     // Loop forever, reading commands from stdin and processing swarm events
     let mut stdin = tokio::io::BufReader::new(tokio::io::stdin()).lines();

@@ -9,7 +9,7 @@ static BOOT_NODES: [&str; 1] =
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create the network client
     let mut swarm = Builder::default().build();
-    swarm.exec();
+    swarm.exec()?;
 
     // Add the boot nodes to the client
     for boot_node in BOOT_NODES.iter() {

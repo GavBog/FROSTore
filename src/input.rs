@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 
-use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD_NO_PAD as b64, Engine as Base64Engine};
 use dashmap::DashMap;
 use frost_ed25519::{round1, Identifier, Signature, SigningPackage, VerifyingKey};
@@ -8,6 +7,7 @@ use futures::channel::oneshot;
 use libp2p::{gossipsub::TopicHash, PeerId, Swarm as Libp2pSwarm};
 use rand::Rng;
 
+use crate::swarm::SwarmError;
 use crate::{
     utils::{get_peers_list, peerid_from_multiaddress},
     Behaviour, DbData, DirectMsgData, GenerationMessage, MessageData, Multiaddr, QueryId,
@@ -40,7 +40,7 @@ impl ReqGenerate {
         }
     }
 
-    pub(crate) fn gen_r1(&mut self, swarm: &mut Libp2pSwarm<Behaviour>) -> Result<()> {
+    pub(crate) fn gen_r1(&mut self, swarm: &mut Libp2pSwarm<Behaviour>) -> Result<(), SwarmError> {
         for count in 1..=self.signer_config.max_signers {
             let peer = self
                 .peers
@@ -58,16 +58,17 @@ impl ReqGenerate {
         Ok(())
     }
 
-    pub(crate) fn insert_response(&mut self, peer: PeerId) -> Result<usize> {
+    pub(crate) fn insert_response(&mut self, peer: PeerId) -> Result<usize, SwarmError> {
         if !self.selected_peers.contains(&peer) {
-            return Err(anyhow::anyhow!("Invalid peer responded"));
+            return Err(SwarmError::InvalidPeer);
         }
         self.peer_response_count += 1;
         Ok(self.peer_response_count)
     }
 
-    pub(crate) fn gen_r2(&mut self, swarm: &mut Libp2pSwarm<Behaviour>) -> Result<()> {
-        let send_message = bincode::serialize(&MessageData::Generation(GenerationMessage::GenR1))?;
+    pub(crate) fn gen_r2(&mut self, swarm: &mut Libp2pSwarm<Behaviour>) -> Result<(), SwarmError> {
+        let send_message = bincode::serialize(&MessageData::Generation(GenerationMessage::GenR1))
+            .map_err(|_| SwarmError::MessageProcessingError)?;
         let _ = swarm
             .behaviour_mut()
             .gossipsub
@@ -75,7 +76,7 @@ impl ReqGenerate {
         Ok(())
     }
 
-    pub(crate) fn send_response(self, response: VerifyingKey) -> Result<()> {
+    pub(crate) fn send_response(self, response: VerifyingKey) -> Result<(), SwarmError> {
         let _ = self.response_channel.send(response);
         Ok(())
     }
@@ -110,10 +111,11 @@ impl ReqSign {
         }
     }
 
-    pub(crate) fn sign_r1(&self, swarm: &mut Libp2pSwarm<Behaviour>) -> Result<()> {
+    pub(crate) fn sign_r1(&self, swarm: &mut Libp2pSwarm<Behaviour>) -> Result<(), SwarmError> {
         let send_message = bincode::serialize(&MessageData::Signing(SigningMessage::SignR1(
             self.query_id.to_string(),
-        )))?;
+        )))
+        .map_err(|_| SwarmError::MessageProcessingError)?;
         let _ = swarm.behaviour_mut().gossipsub.publish(
             TopicHash::from_raw(b64.encode(self.pubkey.clone())),
             send_message,
@@ -125,13 +127,13 @@ impl ReqSign {
         &mut self,
         participant_identifier: Identifier,
         commitments: round1::SigningCommitments,
-    ) -> Result<usize> {
+    ) -> Result<usize, SwarmError> {
         self.commitments_db
             .insert(participant_identifier, commitments);
         Ok(self.commitments_db.len())
     }
 
-    pub(crate) fn sign_r2(&mut self, swarm: &mut Libp2pSwarm<Behaviour>) -> Result<()> {
+    pub(crate) fn sign_r2(&mut self, swarm: &mut Libp2pSwarm<Behaviour>) -> Result<(), SwarmError> {
         if self.finished {
             return Ok(());
         }
@@ -139,8 +141,11 @@ impl ReqSign {
         let signing_package = SigningPackage::new(self.commitments_db.clone(), &self.message);
         let send_message = bincode::serialize(&MessageData::Signing(SigningMessage::SignR2(
             self.query_id.to_string(),
-            signing_package.serialize()?,
-        )))?;
+            signing_package
+                .serialize()
+                .map_err(|_| SwarmError::MessageProcessingError)?,
+        )))
+        .map_err(|_| SwarmError::MessageProcessingError)?;
         let _ = swarm.behaviour_mut().gossipsub.publish(
             TopicHash::from_raw(b64.encode(self.pubkey.clone())),
             send_message,
@@ -148,7 +153,7 @@ impl ReqSign {
         Ok(())
     }
 
-    pub(crate) fn send_response(self, response: Signature) -> Result<()> {
+    pub(crate) fn send_response(self, response: Signature) -> Result<(), SwarmError> {
         let _ = self.response_channel.send(response);
         Ok(())
     }
@@ -157,11 +162,10 @@ impl ReqSign {
 pub(crate) fn handle_add_peer_input(
     multiaddress: Multiaddr,
     swarm: &mut Libp2pSwarm<Behaviour>,
-) -> Result<()> {
-    if let Some(peer) = peerid_from_multiaddress(&multiaddress) {
-        swarm.behaviour_mut().kad.add_address(&peer, multiaddress);
-        let _ = swarm.behaviour_mut().kad.bootstrap();
-    }
+) -> Result<(), SwarmError> {
+    let peer = peerid_from_multiaddress(&multiaddress).ok_or(SwarmError::MessageProcessingError)?;
+    swarm.behaviour_mut().kad.add_address(&peer, multiaddress);
+    let _ = swarm.behaviour_mut().kad.bootstrap();
     Ok(())
 }
 
@@ -171,7 +175,7 @@ pub(crate) fn handle_generate_input(
     response_channel: oneshot::Sender<VerifyingKey>,
     swarm: &mut Libp2pSwarm<Behaviour>,
     generation_requester_db: &DashMap<QueryId, ReqGenerate>,
-) -> Result<()> {
+) -> Result<(), SwarmError> {
     let peer_list = get_peers_list(swarm);
     let mut generate_request = ReqGenerate::new(
         peer_list,
@@ -192,11 +196,11 @@ pub(crate) fn handle_sign_input(
     swarm: &mut Libp2pSwarm<Behaviour>,
     signer_requester_db: &DashMap<QueryId, ReqSign>,
     database: &DashMap<Vec<u8>, DbData>,
-) -> Result<()> {
+) -> Result<(), SwarmError> {
     let signer_config = database
         .get(&public_key)
         .and_then(|data| data.signer_config.clone())
-        .unwrap();
+        .ok_or(SwarmError::DatabaseError)?;
     let sign_requester = ReqSign::new(
         message,
         query_id.clone(),
