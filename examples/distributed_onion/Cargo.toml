@@ -8,7 +8,6 @@ edition = "2021"
 [dependencies]
 anyhow = "1"
 base64 = "0.21.5"
-data-encoding = "2.5.0"
 frostore = { path = "../..", features = ["tokio"] }
-sha3 = "0.10.8"
 tokio = { version = "1", features = ["full"] }
+tor-hscrypto = "0.6.0"

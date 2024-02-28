@@ -1,12 +1,9 @@
-use std::collections::HashMap;
-
 use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD_NO_PAD as b64, Engine as Base64Engine};
-use data_encoding::BASE32_NOPAD;
-use sha3::{Digest, Sha3_256};
-use tokio::{io::AsyncBufReadExt, select};
-
 use frostore::{swarm::SwarmEvent, swarm::SwarmOutput, Builder, Multiaddr, VerifyingKey};
+use std::collections::HashMap;
+use tokio::{io::AsyncBufReadExt, select};
+use tor_hscrypto::pk::HsId;
 
 static TOTAL_PEERS: u16 = 5;
 static MIN_THRESHOLD: u16 = 3;
@@ -70,8 +67,9 @@ async fn main() -> Result<()> {
                 match recv.unwrap() {
                     // Finished generating a new keypair
                     SwarmOutput::Generation(_, pubkey) => {
+                        let hsid = HsId::from(pubkey.serialize());
                         println!("Generated Key: {}", b64.encode(pubkey.serialize()));
-                        println!("Onion Address: {}", onion_address(pubkey.serialize().to_vec()));
+                        println!("Onion Address: {}", hsid);
                     },
                     // Finished signing a message
                     SwarmOutput::Signing(id, signature) => {
@@ -108,23 +106,4 @@ async fn main() -> Result<()> {
             },
         }
     }
-}
-
-fn onion_address(pubkey: Vec<u8>) -> String {
-    let version = vec![0x03];
-    let mut hasher = Sha3_256::new();
-    hasher.update(".onion checksum");
-    hasher.update(&pubkey);
-    hasher.update(&version);
-    let mut checksum = hasher.finalize().to_vec();
-
-    // Keep only the first two bytes
-    checksum.truncate(2);
-    let mut decoded = Vec::new();
-    decoded.extend(pubkey);
-    decoded.extend(checksum);
-    decoded.extend(version);
-
-    // return the encoded string
-    BASE32_NOPAD.encode(&decoded).to_lowercase()
 }
