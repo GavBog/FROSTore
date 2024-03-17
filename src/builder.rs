@@ -1,6 +1,5 @@
-use futures::future::BoxFuture;
-
 use crate::{swarm::Swarm, Keypair, Multiaddr};
+use futures::future::BoxFuture;
 
 pub struct Builder {
     pub key: Keypair,

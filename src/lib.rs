@@ -1,5 +1,10 @@
-use std::sync::Arc;
-
+pub use crate::builder::Builder;
+use crate::{
+    gen::{gen_start, send_final_gen, GenerationMessage, Generator},
+    input::{ReqGenerate, ReqSign},
+    sign::{send_signature, signing_package, Signer, SigningMessage},
+    swarm::{Behaviour, BehaviourEvent, Swarm as FrostSwarm, SwarmError, SwarmInput, SwarmOutput},
+};
 use dashmap::DashMap;
 use frost_ed25519::{
     keys::{KeyPackage, PublicKeyPackage},
@@ -7,10 +12,7 @@ use frost_ed25519::{
     Identifier,
 };
 pub use frost_ed25519::{Signature, VerifyingKey};
-use futures::{
-    channel::mpsc::{self, UnboundedSender},
-    select, FutureExt, StreamExt,
-};
+use futures::{select, FutureExt, StreamExt};
 use libp2p::{
     gossipsub::{self, Event as GossipsubEvent},
     identify,
@@ -22,15 +24,7 @@ pub use libp2p::{
     identity::Keypair, multiaddr::Protocol as MultiaddrProtocol, swarm::Executor, Multiaddr,
 };
 use serde::{Deserialize, Serialize};
-
-pub use crate::builder::Builder;
-use crate::swarm::SwarmError;
-use crate::{
-    gen::{gen_start, send_final_gen, GenerationMessage, Generator},
-    input::{ReqGenerate, ReqSign},
-    sign::{send_signature, signing_package, Signer, SigningMessage},
-    swarm::{Behaviour, BehaviourEvent, SwarmInput, SwarmOutput},
-};
+use std::sync::Arc;
 
 pub mod builder;
 pub mod gen;
@@ -70,15 +64,18 @@ pub struct DbData {
 }
 
 async fn start_swarm(
-    mut input: mpsc::UnboundedReceiver<SwarmInput>,
-    output: UnboundedSender<SwarmOutput>,
+    input: flume::Receiver<SwarmInput>,
+    output: flume::Sender<SwarmOutput>,
     mut swarm: Libp2pSwarm<Behaviour>,
+    frost_swarm: FrostSwarm,
 ) -> Result<(), SwarmError> {
     let generation_requester_db = Arc::new(DashMap::<QueryId, ReqGenerate>::new());
     let generator_db = Arc::new(DashMap::<QueryId, Generator>::new());
     let signer_db = Arc::new(DashMap::<QueryId, Signer>::new());
     let signer_requester_db = Arc::new(DashMap::<QueryId, ReqSign>::new());
     let database = Arc::new(DashMap::<Vec<u8>, DbData>::new());
+
+    let executor = frost_swarm.executor;
 
     // HANDLE INPUT FROM CLIENT
     let handle_client_input = |input: SwarmInput,
@@ -128,6 +125,7 @@ async fn start_swarm(
             MessageData::Signing(signmessage) => {
                 sign::handle_signing_msg(
                     database.clone(),
+                    executor,
                     swarm,
                     signer_db.clone(),
                     signmessage,
@@ -167,6 +165,7 @@ async fn start_swarm(
         match message {
             DirectMsgData::GenStart(query_id, signer_config, participant_id) => {
                 gen_start(
+                    executor,
                     &generator_db,
                     swarm,
                     query_id,
@@ -236,8 +235,8 @@ async fn start_swarm(
                 handle_behavior_event(event, swarm)?;
             }
             _ => {
-                let mut output = output.clone();
-                let _ = output.start_send(SwarmOutput::SwarmEvents(event));
+                let output = output.clone();
+                let _ = output.send(SwarmOutput::SwarmEvents(event));
             }
         }
         Ok(())
@@ -246,19 +245,19 @@ async fn start_swarm(
     // BEGIN MAIN LOOP
     loop {
         select! {
-            recv = input.next().fuse() => {
-                if let Some(recv) = recv {
+            recv = input.recv_async().fuse() => {
+                if let Ok(recv) = recv {
                     handle_client_input(recv, &mut swarm).unwrap_or_else(|e| {
-                        let mut output = output.clone();
-                        let _ = output.start_send(SwarmOutput::Error(e));
+                        let output = output.clone();
+                        let _ = output.send(SwarmOutput::Error(e));
                     });
                 }
             },
             event = swarm.next().fuse() => {
                 if let Some(event) = event {
                     handle_event(event, &mut swarm).unwrap_or_else(|e| {
-                        let mut output = output.clone();
-                        let _ = output.start_send(SwarmOutput::Error(e));
+                        let output = output.clone();
+                        let _ = output.send(SwarmOutput::Error(e));
                     });
                 }
             },

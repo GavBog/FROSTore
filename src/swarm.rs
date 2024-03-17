@@ -1,11 +1,9 @@
-use std::time::Duration;
-
-use frost_ed25519::{Signature, VerifyingKey};
-use futures::{
-    channel::{mpsc, oneshot},
-    future::BoxFuture,
-    StreamExt,
+use crate::{
+    start_swarm, utils::PROTOCOL_VERSION, DirectMsgData, Executor, Keypair, QueryId, SignerConfig,
 };
+use flume::RecvError;
+use frost_ed25519::{Signature, VerifyingKey};
+use futures::{channel::oneshot, future::BoxFuture};
 use libp2p::swarm::NetworkBehaviour;
 pub use libp2p::swarm::SwarmEvent;
 use libp2p::{
@@ -21,11 +19,8 @@ use libp2p::{
     tcp, yamux, Multiaddr, Swarm as Libp2pSwarm, Transport,
 };
 use rand::{distributions::Alphanumeric, Rng};
+use std::time::Duration;
 use thiserror::Error;
-
-use crate::{
-    start_swarm, utils::PROTOCOL_VERSION, DirectMsgData, Executor, Keypair, QueryId, SignerConfig,
-};
 
 #[derive(Error, Debug)]
 pub enum SwarmError {
@@ -106,9 +101,10 @@ impl From<request_response::Event<DirectMsgData, Vec<u8>>> for BehaviourEvent {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct Swarm {
-    pub input_tx: Option<mpsc::UnboundedSender<SwarmInput>>,
-    pub output_rx: Option<mpsc::UnboundedReceiver<SwarmOutput>>,
+    pub input_tx: Option<flume::Sender<SwarmInput>>,
+    pub output_rx: Option<flume::Receiver<SwarmOutput>>,
     pub key: Keypair,
     pub addresses: Vec<Multiaddr>,
     pub executor: fn(BoxFuture<'static, ()>),
@@ -116,25 +112,30 @@ pub struct Swarm {
 
 impl Swarm {
     pub fn exec(&mut self) -> Result<(), SwarmError> {
-        let (input_tx, input_rx) = mpsc::unbounded::<SwarmInput>();
-        let (output_tx, output_rx) = mpsc::unbounded::<SwarmOutput>();
+        let (input_tx, input_rx) = flume::unbounded::<SwarmInput>();
+        let (output_tx, output_rx) = flume::unbounded::<SwarmOutput>();
         self.input_tx = Some(input_tx);
         self.output_rx = Some(output_rx);
-        let swarm = create_libp2p_swarm(self)?;
+        let libp2p_swarm = create_libp2p_swarm(self)?;
+        let frost_swarm = self.clone();
         self.executor.exec(Box::pin(async move {
-            let _ = start_swarm(input_rx, output_tx, swarm).await;
+            let _ = start_swarm(input_rx, output_tx, libp2p_swarm, frost_swarm).await;
         }));
         Ok(())
     }
 
     #[allow(clippy::should_implement_trait)]
-    pub fn next(&mut self) -> BoxFuture<'_, Option<SwarmOutput>> {
-        Box::pin(self.output_rx.as_mut().unwrap().next())
+    pub fn next(&mut self) -> BoxFuture<'_, Result<SwarmOutput, RecvError>> {
+        Box::pin(self.output_rx.as_mut().unwrap().recv_async())
     }
 
     pub fn add_peer(&mut self, multiaddr: Multiaddr) -> Result<(), SwarmError> {
         let send_message = SwarmInput::AddPeer(multiaddr);
-        let _ = self.input_tx.as_mut().unwrap().start_send(send_message);
+        let _ = self
+            .input_tx
+            .as_mut()
+            .ok_or(SwarmError::ConfigurationError)?
+            .send(send_message);
         Ok(())
     }
 
@@ -157,7 +158,7 @@ impl Swarm {
             },
             tx,
         );
-        let _ = self.input_tx.as_mut().unwrap().start_send(send_message);
+        let _ = self.input_tx.as_mut().unwrap().send(send_message);
         (
             query_id,
             Box::pin(async move {
@@ -180,7 +181,7 @@ impl Swarm {
             .collect::<String>();
         let send_message =
             SwarmInput::Sign(query_id.clone(), tx, pubkey.serialize().to_vec(), message);
-        let _ = self.input_tx.as_mut().unwrap().start_send(send_message);
+        let _ = self.input_tx.as_mut().unwrap().send(send_message);
         (
             query_id,
             Box::pin(async move {

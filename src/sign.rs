@@ -1,14 +1,14 @@
-use std::{collections::BTreeMap, sync::Arc};
-
+use crate::{
+    input::ReqSign, swarm::SwarmError, utils::schedule_database_cleanup, Behaviour, DbData,
+    DirectMsgData, MessageData, QueryId, SwarmOutput,
+};
 use base64::{engine::general_purpose::STANDARD_NO_PAD as b64, Engine as Base64Engine};
 use dashmap::{mapref::one::RefMut, DashMap};
 use frost_ed25519::{round1, round2, Identifier, Signature, SigningPackage, VerifyingKey};
-use futures::channel::mpsc::UnboundedSender;
+use futures::future::BoxFuture;
 use libp2p::{gossipsub::TopicHash, PeerId, Swarm as Libp2pSwarm, Swarm};
 use serde::{Deserialize, Serialize};
-
-use crate::swarm::SwarmError;
-use crate::{input::ReqSign, Behaviour, DbData, DirectMsgData, MessageData, QueryId, SwarmOutput};
+use std::{collections::BTreeMap, sync::Arc};
 
 #[derive(Deserialize, Serialize)]
 pub(crate) enum SigningMessage {
@@ -137,6 +137,7 @@ impl Signer {
 
 pub(crate) fn handle_signing_msg(
     database: Arc<DashMap<Vec<u8>, DbData>>,
+    executor: fn(BoxFuture<'static, ()>),
     swarm: &mut Libp2pSwarm<Behaviour>,
     signer_db: Arc<DashMap<QueryId, Signer>>,
     message: SigningMessage,
@@ -147,6 +148,7 @@ pub(crate) fn handle_signing_msg(
         SigningMessage::SignR1(query_id) => {
             handle_r1_signing(
                 database,
+                executor,
                 swarm,
                 signer_db,
                 propagation_source,
@@ -166,6 +168,7 @@ pub(crate) fn handle_signing_msg(
 
 fn handle_r1_signing(
     database: Arc<DashMap<Vec<u8>, DbData>>,
+    executor: fn(BoxFuture<'static, ()>),
     swarm: &mut Libp2pSwarm<Behaviour>,
     signer_db: Arc<DashMap<QueryId, Signer>>,
     propagation_source: PeerId,
@@ -185,7 +188,9 @@ fn handle_r1_signing(
         topic,
     );
     signer.sign_r1(swarm)?;
-    signer_db.insert(query_id, signer);
+    signer_db.insert(query_id.clone(), signer);
+
+    schedule_database_cleanup(executor, signer_db, query_id);
     Ok(())
 }
 
@@ -256,12 +261,12 @@ fn handle_final_signing(
 }
 
 pub(crate) fn send_signature(
-    mut output: UnboundedSender<SwarmOutput>,
+    output: flume::Sender<SwarmOutput>,
     signer_requester_db: &Arc<DashMap<QueryId, ReqSign>>,
     query_id: QueryId,
     signature: Signature,
 ) -> Result<(), SwarmError> {
-    let _ = output.start_send(SwarmOutput::Signing(query_id.clone(), signature));
+    let _ = output.send(SwarmOutput::Signing(query_id.clone(), signature));
     if !signer_requester_db.contains_key(&query_id) {
         return Ok(());
     }

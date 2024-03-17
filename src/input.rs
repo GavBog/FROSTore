@@ -1,18 +1,16 @@
-use std::collections::BTreeMap;
-
+use crate::{
+    swarm::SwarmError,
+    utils::{get_peers_list, peerid_from_multiaddress},
+    Behaviour, DbData, DirectMsgData, GenerationMessage, MessageData, Multiaddr, QueryId,
+    SignerConfig, SigningMessage,
+};
 use base64::{engine::general_purpose::STANDARD_NO_PAD as b64, Engine as Base64Engine};
 use dashmap::DashMap;
 use frost_ed25519::{round1, Identifier, Signature, SigningPackage, VerifyingKey};
 use futures::channel::oneshot;
 use libp2p::{gossipsub::TopicHash, PeerId, Swarm as Libp2pSwarm};
 use rand::Rng;
-
-use crate::swarm::SwarmError;
-use crate::{
-    utils::{get_peers_list, peerid_from_multiaddress},
-    Behaviour, DbData, DirectMsgData, GenerationMessage, MessageData, Multiaddr, QueryId,
-    SignerConfig, SigningMessage,
-};
+use std::collections::BTreeMap;
 
 pub(crate) struct ReqGenerate {
     peers: Vec<PeerId>,
@@ -41,6 +39,9 @@ impl ReqGenerate {
     }
 
     pub(crate) fn gen_r1(&mut self, swarm: &mut Libp2pSwarm<Behaviour>) -> Result<(), SwarmError> {
+        if self.signer_config.max_signers > self.peers.len() as u16 {
+            return Err(SwarmError::GenerationError);
+        }
         for count in 1..=self.signer_config.max_signers {
             let peer = self
                 .peers

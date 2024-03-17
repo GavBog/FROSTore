@@ -1,15 +1,18 @@
 [package]
-name = "distributed_onion"
+name = "restful_frost"
 version = "0.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-anyhow = "1"
-base64 = "0.21.5"
+axum = "0.7.4"
+base64 = "0.22.0"
 frostore = { path = "../..", features = ["tokio"] }
 log = "0.4.21"
 pretty_env_logger = "0.5.0"
+serde = "1"
 tokio = { version = "1", features = ["full"] }
-tor-hscrypto = "0.6.0"
+
+[dev-dependencies]
+reqwest = "0.11.25"

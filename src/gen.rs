@@ -1,23 +1,20 @@
-use std::{collections::BTreeMap, sync::Arc};
-
+use crate::{
+    input::ReqGenerate, swarm::SwarmError, utils::schedule_database_cleanup, Behaviour, DbData,
+    DirectMsgData, MessageData, QueryId, SignerConfig, SwarmOutput,
+};
 use base64::{engine::general_purpose::STANDARD_NO_PAD as b64, Engine as Base64Engine};
 use dashmap::{mapref::one::RefMut, DashMap};
 use frost_ed25519::{
     keys::{dkg, KeyPackage, PublicKeyPackage},
     Identifier,
 };
-use futures::channel::mpsc::UnboundedSender;
+use futures::future::BoxFuture;
 use libp2p::{
     gossipsub::{IdentTopic, TopicHash},
-    PeerId, Swarm as Libp2pSwarm, Swarm,
+    PeerId, Swarm, Swarm as Libp2pSwarm,
 };
 use serde::{Deserialize, Serialize};
-
-use crate::swarm::SwarmError;
-use crate::{
-    input::ReqGenerate, Behaviour, DbData, DirectMsgData, MessageData, QueryId, SignerConfig,
-    SwarmOutput,
-};
+use std::{collections::BTreeMap, sync::Arc};
 
 #[derive(Deserialize, Serialize)]
 pub(crate) enum GenerationMessage {
@@ -135,6 +132,7 @@ impl Generator {
 }
 
 pub(crate) fn gen_start(
+    executor: fn(BoxFuture<'static, ()>),
     generator_db: &Arc<DashMap<QueryId, Generator>>,
     swarm: &mut Swarm<Behaviour>,
     query_id: QueryId,
@@ -151,7 +149,9 @@ pub(crate) fn gen_start(
     let _ = swarm
         .behaviour_mut()
         .gossipsub
-        .subscribe(&IdentTopic::new(query_id));
+        .subscribe(&IdentTopic::new(&query_id));
+
+    schedule_database_cleanup(executor, generator_db.clone(), query_id);
     Ok(())
 }
 
@@ -233,13 +233,13 @@ fn handle_final_generation(
 }
 
 pub(crate) fn send_final_gen(
-    mut output: UnboundedSender<SwarmOutput>,
+    output: flume::Sender<SwarmOutput>,
     generation_requester_db: &Arc<DashMap<QueryId, ReqGenerate>>,
     database: Arc<DashMap<Vec<u8>, DbData>>,
     query_id: QueryId,
     pubkey_package: PublicKeyPackage,
 ) -> Result<(), SwarmError> {
-    let _ = output.start_send(SwarmOutput::Generation(
+    let _ = output.send(SwarmOutput::Generation(
         query_id.clone(),
         *pubkey_package.verifying_key(),
     ));
