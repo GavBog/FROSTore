@@ -102,7 +102,3 @@ FROSTore is primarily based on the following research papers:
 
 - [Two-Round Threshold Schnorr Signatures with FROST](https://datatracker.ietf.org/doc/draft-irtf-cfrg-frost/)
 - [FROST: Flexible Round-Optimized Schnorr Threshold Signatures](https://eprint.iacr.org/2020/852.pdf)
-
-## Disclaimers
-
-This is a work in progress and is in **BETA**. It is not ready for production use.
