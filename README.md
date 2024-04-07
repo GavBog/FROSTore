@@ -11,6 +11,7 @@ Ed25519 Threshold Signature Database
 
 [![Crates.io](https://img.shields.io/crates/v/frostore.svg)](https://crates.io/crates/frostore)
 [![License: GPLv3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+
 </div>
 
 ## Introduction
@@ -46,8 +47,7 @@ static BOOT_NODES: [&str; 3] = [
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create the network client
-    let mut swarm = Builder::default().build();
-    swarm.exec()?;
+    let mut swarm = Swarm::builder().build_and_exec()?;
 
     // Add the boot nodes to the client
     for boot_node in BOOT_NODES.iter() {
@@ -61,7 +61,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Wait for the next event
         let event = swarm.next().await.unwrap();
         // If the event is a connection established event, increment the peer count
-        if let swarm::SwarmOutput::SwarmEvents(swarm::SwarmEvent::ConnectionEstablished { peer_id, .. }) = event {
+        if let swarm::SwarmOutput::SwarmEvents(swarm::SwarmEvent::ConnectionEstablished {
+            peer_id,
+            ..
+        }) = event
+        {
             eprintln!("Connected to peer: {}", peer_id);
             peer_count += 1;
             eprintln!("Peer count: {}", peer_count);

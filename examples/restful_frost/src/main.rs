@@ -6,8 +6,8 @@ use axum::{
 };
 use base64::{engine::general_purpose::STANDARD as b64, Engine as _};
 use frostore::{
-    swarm::{Swarm, SwarmError, SwarmEvent, SwarmOutput},
-    Builder, Multiaddr, VerifyingKey,
+    swarm::{SwarmError, SwarmEvent, SwarmOutput},
+    Multiaddr, Swarm, VerifyingKey,
 };
 use log::{error, info, trace, warn};
 use serde::{Deserialize, Serialize};
@@ -27,8 +27,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse_default_env()
         .init();
 
-    let mut swarm = Builder::new().build();
-    swarm.exec()?;
+    let mut swarm = Swarm::builder().build_and_exec()?;
+
     // Add the boot nodes to the client
     for boot_node in BOOT_NODES.iter() {
         let multiaddr: Multiaddr = boot_node.parse().unwrap();

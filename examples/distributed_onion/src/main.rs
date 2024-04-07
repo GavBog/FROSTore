@@ -2,7 +2,7 @@ use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD_NO_PAD as b64, Engine as Base64Engine};
 use frostore::{
     swarm::{SwarmError, SwarmEvent, SwarmOutput},
-    Builder, Multiaddr, VerifyingKey,
+    Multiaddr, Swarm, VerifyingKey,
 };
 use log::{error, info, trace, warn};
 use std::collections::HashMap;
@@ -22,11 +22,8 @@ async fn main() -> Result<()> {
     // Create a hashmap to store the requests we make
     let mut request_db = HashMap::new();
 
-    // Create a new swarm network
-    let mut swarm = Builder::new().build();
-
-    // Start the swarm network in the background
-    swarm.exec()?;
+    // Create a new swarm network and Start the swarm network in the background
+    let mut swarm = Swarm::builder().build_and_exec()?;
 
     // Loop forever, reading commands from stdin and processing swarm events
     let mut stdin = tokio::io::BufReader::new(tokio::io::stdin()).lines();

@@ -1,5 +1,6 @@
 use crate::{
-    start_swarm, utils::PROTOCOL_VERSION, DirectMsgData, Executor, Keypair, QueryId, SignerConfig,
+    builder::Builder, start_swarm, utils::PROTOCOL_VERSION, DirectMsgData, Executor, Keypair,
+    QueryId, SignerConfig,
 };
 use flume::RecvError;
 use frost_ed25519::{Signature, VerifyingKey};
@@ -35,6 +36,8 @@ pub enum SwarmError {
     // Data handling errors
     #[error("Configuration error")]
     ConfigurationError,
+    #[error("The Swarm has already been executed!")]
+    ExecutionError,
     #[error("Message processing error")]
     MessageProcessingError,
     #[error("Database error")]
@@ -111,9 +114,18 @@ pub struct Swarm {
 }
 
 impl Swarm {
+    pub fn builder() -> Builder {
+        Builder::default()
+    }
+
     pub fn exec(&mut self) -> Result<(), SwarmError> {
         let (input_tx, input_rx) = flume::unbounded::<SwarmInput>();
         let (output_tx, output_rx) = flume::unbounded::<SwarmOutput>();
+
+        if self.input_tx.is_some() || self.output_rx.is_some() {
+            return Err(SwarmError::ExecutionError);
+        }
+
         self.input_tx = Some(input_tx);
         self.output_rx = Some(output_rx);
         let libp2p_swarm = create_libp2p_swarm(self)?;

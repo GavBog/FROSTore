@@ -63,4 +63,10 @@ impl Builder {
             executor: self.executor,
         }
     }
+
+    pub fn build_and_exec(self) -> Result<Swarm, crate::SwarmError> {
+        let mut swarm = self.build();
+        swarm.exec()?;
+        Ok(swarm)
+    }
 }

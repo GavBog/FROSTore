@@ -1,4 +1,4 @@
-pub use crate::builder::Builder;
+pub use crate::swarm::Swarm;
 use crate::{
     gen::{gen_start, send_final_gen, GenerationMessage, Generator},
     input::{ReqGenerate, ReqSign},
