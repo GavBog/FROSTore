@@ -136,9 +136,12 @@ impl Swarm {
         Ok(())
     }
 
-    #[allow(clippy::should_implement_trait)]
-    pub fn next(&mut self) -> BoxFuture<'_, Result<SwarmOutput, RecvError>> {
-        Box::pin(self.output_rx.as_mut().unwrap().recv_async())
+    pub async fn next(&mut self) -> Result<SwarmOutput, RecvError> {
+        self.output_rx
+            .as_mut()
+            .ok_or(RecvError::Disconnected)?
+            .recv_async()
+            .await
     }
 
     pub fn add_peer(&mut self, multiaddr: Multiaddr) -> Result<(), SwarmError> {
@@ -170,10 +173,14 @@ impl Swarm {
             },
             tx,
         );
-        let _ = self.input_tx.as_mut().unwrap().send(send_message);
         (
             query_id,
             Box::pin(async move {
+                let _ = self
+                    .input_tx
+                    .as_mut()
+                    .ok_or(SwarmError::ConfigurationError)?
+                    .send(send_message);
                 let response = rx.await.map_err(|_| SwarmError::MessageProcessingError)?;
                 Ok(response)
             }),
@@ -193,10 +200,14 @@ impl Swarm {
             .collect::<String>();
         let send_message =
             SwarmInput::Sign(query_id.clone(), tx, pubkey.serialize().to_vec(), message);
-        let _ = self.input_tx.as_mut().unwrap().send(send_message);
         (
             query_id,
             Box::pin(async move {
+                let _ = self
+                    .input_tx
+                    .as_mut()
+                    .ok_or(SwarmError::ConfigurationError)?
+                    .send(send_message);
                 let response = rx.await.map_err(|_| SwarmError::MessageProcessingError)?;
                 Ok(response)
             }),
@@ -208,7 +219,9 @@ fn create_libp2p_swarm(config: &Swarm) -> Result<Libp2pSwarm<Behaviour>, SwarmEr
     let behavior = Behaviour {
         gossipsub: gossipsub::Behaviour::new(
             gossipsub::MessageAuthenticity::Signed(config.key.clone()),
-            gossipsub::ConfigBuilder::default().build().unwrap(),
+            gossipsub::ConfigBuilder::default()
+                .build()
+                .map_err(|_| SwarmError::ConfigurationError)?,
         )
         .map_err(|_| SwarmError::ConfigurationError)?,
         identify: identify::Behaviour::new(identify::Config::new(
