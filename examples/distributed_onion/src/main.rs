@@ -105,6 +105,9 @@ async fn main() -> Result<()> {
                                 _ => { },
                             }
                         },
+                        SwarmOutput::Shutdown => {
+                            info!("Shutting down...");
+                        },
                         // Print out any errors
                         SwarmOutput::Error(e) => match e {
                             SwarmError::ConfigurationError | SwarmError::InvalidSignature => {

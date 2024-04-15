@@ -2,7 +2,6 @@ use crate::{
     builder::Builder, start_swarm, utils::PROTOCOL_VERSION, DirectMsgData, Executor, Keypair,
     QueryId, SignerConfig,
 };
-use flume::RecvError;
 use frost_ed25519::{Signature, VerifyingKey};
 use futures::{channel::oneshot, future::BoxFuture};
 use libp2p::swarm::NetworkBehaviour;
@@ -53,6 +52,7 @@ pub enum SwarmInput {
     AddPeer(Multiaddr),
     Generate(QueryId, SignerConfig, oneshot::Sender<VerifyingKey>),
     Sign(QueryId, oneshot::Sender<Signature>, Vec<u8>, Vec<u8>),
+    Shutdown,
 }
 
 #[derive(Debug)]
@@ -61,6 +61,7 @@ pub enum SwarmOutput {
     Generation(QueryId, VerifyingKey),
     Signing(QueryId, Signature),
     SwarmEvents(SwarmEvent<BehaviourEvent>),
+    Shutdown,
 }
 
 #[derive(NetworkBehaviour)]
@@ -119,29 +120,29 @@ impl Swarm {
     }
 
     pub fn exec(&mut self) -> Result<(), SwarmError> {
-        let (input_tx, input_rx) = flume::unbounded::<SwarmInput>();
-        let (output_tx, output_rx) = flume::unbounded::<SwarmOutput>();
-
         if self.input_tx.is_some() || self.output_rx.is_some() {
             return Err(SwarmError::ExecutionError);
         }
 
+        let (input_tx, input_rx) = flume::unbounded::<SwarmInput>();
+        let (output_tx, output_rx) = flume::unbounded::<SwarmOutput>();
+
         self.input_tx = Some(input_tx);
         self.output_rx = Some(output_rx);
-        let libp2p_swarm = create_libp2p_swarm(self)?;
         let frost_swarm = self.clone();
         self.executor.exec(Box::pin(async move {
-            let _ = start_swarm(input_rx, output_tx, libp2p_swarm, frost_swarm).await;
+            let _ = start_swarm(input_rx, output_tx, frost_swarm).await;
         }));
         Ok(())
     }
 
-    pub async fn next(&mut self) -> Result<SwarmOutput, RecvError> {
+    pub async fn next(&mut self) -> Result<SwarmOutput, SwarmError> {
         self.output_rx
             .as_mut()
-            .ok_or(RecvError::Disconnected)?
+            .ok_or(SwarmError::ConfigurationError)?
             .recv_async()
             .await
+            .map_err(|_| SwarmError::MessageProcessingError)
     }
 
     pub fn add_peer(&mut self, multiaddr: Multiaddr) -> Result<(), SwarmError> {
@@ -213,9 +214,21 @@ impl Swarm {
             }),
         )
     }
+
+    pub fn shutdown(&mut self) -> Result<(), SwarmError> {
+        let _ = self
+            .input_tx
+            .as_mut()
+            .ok_or_else(|| SwarmError::ConfigurationError)?
+            .send(SwarmInput::Shutdown)
+            .map_err(|_| SwarmError::MessageProcessingError);
+        self.input_tx = None;
+        self.output_rx = None;
+        Ok(())
+    }
 }
 
-fn create_libp2p_swarm(config: &Swarm) -> Result<Libp2pSwarm<Behaviour>, SwarmError> {
+pub(crate) fn create_libp2p_swarm(config: &Swarm) -> Result<Libp2pSwarm<Behaviour>, SwarmError> {
     let behavior = Behaviour {
         gossipsub: gossipsub::Behaviour::new(
             gossipsub::MessageAuthenticity::Signed(config.key.clone()),

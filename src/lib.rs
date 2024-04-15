@@ -3,7 +3,10 @@ use crate::{
     gen::{gen_start, send_final_gen, GenerationMessage, Generator},
     input::{ReqGenerate, ReqSign},
     sign::{send_signature, signing_package, Signer, SigningMessage},
-    swarm::{Behaviour, BehaviourEvent, Swarm as FrostSwarm, SwarmError, SwarmInput, SwarmOutput},
+    swarm::{
+        create_libp2p_swarm, Behaviour, BehaviourEvent, Swarm as FrostSwarm, SwarmError,
+        SwarmInput, SwarmOutput,
+    },
 };
 use dashmap::DashMap;
 use frost_ed25519::{
@@ -66,7 +69,6 @@ pub struct DbData {
 async fn start_swarm(
     input: flume::Receiver<SwarmInput>,
     output: flume::Sender<SwarmOutput>,
-    mut swarm: Libp2pSwarm<Behaviour>,
     frost_swarm: FrostSwarm,
 ) -> Result<(), SwarmError> {
     let generation_requester_db = Arc::new(DashMap::<QueryId, ReqGenerate>::new());
@@ -75,6 +77,7 @@ async fn start_swarm(
     let signer_requester_db = Arc::new(DashMap::<QueryId, ReqSign>::new());
     let database = Arc::new(DashMap::<Vec<u8>, DbData>::new());
 
+    let mut libp2p_swarm = create_libp2p_swarm(&frost_swarm)?;
     let executor = frost_swarm.executor;
 
     // HANDLE INPUT FROM CLIENT
@@ -101,6 +104,11 @@ async fn start_swarm(
                 &signer_requester_db,
                 &database,
             )?,
+            SwarmInput::Shutdown => {
+                return output
+                    .send(SwarmOutput::Shutdown)
+                    .map_err(|_| SwarmError::MessageProcessingError);
+            }
         }
         Ok(())
     };
@@ -242,23 +250,37 @@ async fn start_swarm(
         Ok(())
     };
 
+    let output_rx = frost_swarm
+        .output_rx
+        .ok_or(SwarmError::MessageProcessingError)?;
+
     // BEGIN MAIN LOOP
     loop {
         select! {
             recv = input.recv_async().fuse() => {
                 if let Ok(recv) = recv {
-                    handle_client_input(recv, &mut swarm).unwrap_or_else(|e| {
+                    handle_client_input(recv, &mut libp2p_swarm).unwrap_or_else(|e| {
                         let output = output.clone();
                         let _ = output.send(SwarmOutput::Error(e));
                     });
                 }
             },
-            event = swarm.next().fuse() => {
+            event = libp2p_swarm.next().fuse() => {
                 if let Some(event) = event {
-                    handle_event(event, &mut swarm).unwrap_or_else(|e| {
+                    handle_event(event, &mut libp2p_swarm).unwrap_or_else(|e| {
                         let output = output.clone();
                         let _ = output.send(SwarmOutput::Error(e));
                     });
+                }
+            },
+            output = output_rx.recv_async().fuse() => {
+                if let Ok(output) = output {
+                    match output {
+                        SwarmOutput::Shutdown => {
+                            return Ok(());
+                        }
+                        _ => {}
+                    }
                 }
             },
         }
