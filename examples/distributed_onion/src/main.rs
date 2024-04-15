@@ -44,7 +44,7 @@ async fn main() -> Result<()> {
                             info!("Added peer: {}", multiaddr);
                         },
                         // Begin generation of a new keypair using DKG (Distributed Key Generation) on the swarm network
-                        line if line.starts_with("GENERATE") => {
+                        line if (line == "GENERATE") => {
                             let _ = swarm.generate(MIN_THRESHOLD, TOTAL_PEERS);
                             info!("Beginning generation");
                         },
@@ -63,6 +63,10 @@ async fn main() -> Result<()> {
                             let id = swarm.sign(pubkey, message.clone()).0;
                             request_db.insert(id, (pubkey, message));
                             info!("Signing message!");
+                        },
+                        line if (line == "CLOSE") => {
+                            info!("Shutting down...");
+                            swarm.shutdown()?;
                         },
                         _ => {
                             warn!("Unknown command");
@@ -106,7 +110,8 @@ async fn main() -> Result<()> {
                             }
                         },
                         SwarmOutput::Shutdown => {
-                            info!("Shutting down...");
+                            info!("Closed");
+                            return Ok(());
                         },
                         // Print out any errors
                         SwarmOutput::Error(e) => match e {
