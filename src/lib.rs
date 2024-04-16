@@ -274,13 +274,8 @@ async fn start_swarm(
                 }
             },
             output = output_rx.recv_async().fuse() => {
-                if let Ok(output) = output {
-                    match output {
-                        SwarmOutput::Shutdown => {
-                            return Ok(());
-                        }
-                        _ => {}
-                    }
+                if let Ok(SwarmOutput::Shutdown) = output {
+                    return Ok(());
                 }
             },
         }

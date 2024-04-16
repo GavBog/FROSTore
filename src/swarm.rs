@@ -216,12 +216,11 @@ impl Swarm {
     }
 
     pub fn shutdown(&mut self) -> Result<(), SwarmError> {
-        let _ = self
-            .input_tx
+        self.input_tx
             .as_mut()
-            .ok_or_else(|| SwarmError::ConfigurationError)?
+            .ok_or(SwarmError::ConfigurationError)?
             .send(SwarmInput::Shutdown)
-            .map_err(|_| SwarmError::MessageProcessingError);
+            .map_err(|_| SwarmError::MessageProcessingError)?;
         self.input_tx = None;
         self.output_rx = None;
         Ok(())
