@@ -122,9 +122,9 @@ async fn start_swarm(
         match message_data {
             MessageData::Generation(genmessage) => {
                 gen::handle_generation_msg(
-                    database.clone(),
+                    &database,
                     swarm,
-                    generator_db.clone(),
+                    &generator_db,
                     genmessage,
                     message.source.ok_or(SwarmError::MessageProcessingError)?,
                     message.topic,
@@ -132,10 +132,10 @@ async fn start_swarm(
             }
             MessageData::Signing(signmessage) => {
                 sign::handle_signing_msg(
-                    database.clone(),
+                    &database,
                     executor,
                     swarm,
-                    signer_db.clone(),
+                    &signer_db,
                     signmessage,
                     message.source.ok_or(SwarmError::MessageProcessingError)?,
                     message.topic,
@@ -151,9 +151,9 @@ async fn start_swarm(
                     handle_gossipsub_message(message, swarm)?;
                 }
                 GossipsubEvent::Subscribed { topic, peer_id } => {
-                    if generation_requester_db.contains_key(&topic.to_string()) {
+                    if generation_requester_db.contains_key(topic.as_str()) {
                         let mut generation_requester = generation_requester_db
-                            .get_mut(&topic.to_string())
+                            .get_mut(topic.as_str())
                             .ok_or(SwarmError::DatabaseError)?;
                         let count = generation_requester.insert_response(peer_id)?;
                         if count >= generation_requester.signer_config.max_signers as usize {
@@ -183,15 +183,15 @@ async fn start_swarm(
             }
             DirectMsgData::ReturnGen(query_id, pubkey_package) => {
                 send_final_gen(
-                    output.clone(),
+                    &output,
                     &generation_requester_db,
-                    database.clone(),
+                    &database,
                     query_id,
                     pubkey_package,
                 )?;
             }
             DirectMsgData::ReturnSign(query_id, signature) => {
-                send_signature(output.clone(), &signer_requester_db, query_id, signature)?;
+                send_signature(&output, &signer_requester_db, query_id, signature)?;
             }
             DirectMsgData::SigningPackage(query_id, identifier, signing_commitments) => {
                 signing_package(
@@ -243,7 +243,6 @@ async fn start_swarm(
                 handle_behavior_event(event, swarm)?;
             }
             _ => {
-                let output = output.clone();
                 let _ = output.send(SwarmOutput::SwarmEvents(event));
             }
         }
@@ -260,7 +259,6 @@ async fn start_swarm(
             recv = input.recv_async().fuse() => {
                 if let Ok(recv) = recv {
                     handle_client_input(recv, &mut libp2p_swarm).unwrap_or_else(|e| {
-                        let output = output.clone();
                         let _ = output.send(SwarmOutput::Error(e));
                     });
                 }
@@ -268,7 +266,6 @@ async fn start_swarm(
             event = libp2p_swarm.next().fuse() => {
                 if let Some(event) = event {
                     handle_event(event, &mut libp2p_swarm).unwrap_or_else(|e| {
-                        let output = output.clone();
                         let _ = output.send(SwarmOutput::Error(e));
                     });
                 }

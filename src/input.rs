@@ -49,11 +49,7 @@ impl ReqGenerate {
             self.selected_peers.push(peer);
             let _ = swarm.behaviour_mut().req_res.send_request(
                 &peer,
-                DirectMsgData::GenStart(
-                    self.query_id.to_string(),
-                    self.signer_config.clone(),
-                    count,
-                ),
+                DirectMsgData::GenStart(self.query_id.clone(), self.signer_config.clone(), count),
             );
         }
         Ok(())
@@ -73,7 +69,7 @@ impl ReqGenerate {
         let _ = swarm
             .behaviour_mut()
             .gossipsub
-            .publish(TopicHash::from_raw(self.query_id.to_string()), send_message);
+            .publish(TopicHash::from_raw(self.query_id.clone()), send_message);
         Ok(())
     }
 
@@ -114,7 +110,7 @@ impl ReqSign {
 
     pub(crate) fn sign_r1(&self, swarm: &mut Libp2pSwarm<Behaviour>) -> Result<(), SwarmError> {
         let send_message = bincode::serialize(&MessageData::Signing(SigningMessage::SignR1(
-            self.query_id.to_string(),
+            self.query_id.clone(),
         )))
         .map_err(|_| SwarmError::MessageProcessingError)?;
         let _ = swarm.behaviour_mut().gossipsub.publish(
@@ -141,7 +137,7 @@ impl ReqSign {
         self.finished = true;
         let signing_package = SigningPackage::new(self.commitments_db.clone(), &self.message);
         let send_message = bincode::serialize(&MessageData::Signing(SigningMessage::SignR2(
-            self.query_id.to_string(),
+            self.query_id.clone(),
             signing_package
                 .serialize()
                 .map_err(|_| SwarmError::MessageProcessingError)?,

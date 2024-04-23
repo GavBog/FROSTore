@@ -58,7 +58,7 @@ impl Signer {
         let _ = swarm.behaviour_mut().req_res.send_request(
             &self.propagation_source,
             DirectMsgData::SigningPackage(
-                self.query_id.to_string(),
+                self.query_id.clone(),
                 self.data.identifier.ok_or(SwarmError::DatabaseError)?,
                 commitments,
             ),
@@ -94,7 +94,7 @@ impl Signer {
         );
         self.signing_package = Some(signing_package);
         let send_message = bincode::serialize(&MessageData::Signing(SigningMessage::SignFinal(
-            self.query_id.to_string(),
+            self.query_id.clone(),
             self.data.identifier.ok_or(SwarmError::DatabaseError)?,
             signature,
         )))
@@ -136,10 +136,10 @@ impl Signer {
 }
 
 pub(crate) fn handle_signing_msg(
-    database: Arc<DashMap<Vec<u8>, DbData>>,
+    database: &Arc<DashMap<Vec<u8>, DbData>>,
     executor: fn(BoxFuture<'static, ()>),
     swarm: &mut Libp2pSwarm<Behaviour>,
-    signer_db: Arc<DashMap<QueryId, Signer>>,
+    signer_db: &Arc<DashMap<QueryId, Signer>>,
     message: SigningMessage,
     propagation_source: PeerId,
     topic: TopicHash,
@@ -167,10 +167,10 @@ pub(crate) fn handle_signing_msg(
 }
 
 fn handle_r1_signing(
-    database: Arc<DashMap<Vec<u8>, DbData>>,
+    database: &Arc<DashMap<Vec<u8>, DbData>>,
     executor: fn(BoxFuture<'static, ()>),
     swarm: &mut Libp2pSwarm<Behaviour>,
-    signer_db: Arc<DashMap<QueryId, Signer>>,
+    signer_db: &Arc<DashMap<QueryId, Signer>>,
     propagation_source: PeerId,
     topic: TopicHash,
     query_id: QueryId,
@@ -190,7 +190,7 @@ fn handle_r1_signing(
     signer.sign_r1(swarm)?;
     signer_db.insert(query_id.clone(), signer);
 
-    schedule_database_cleanup(executor, signer_db, query_id);
+    schedule_database_cleanup(executor, signer_db.clone(), query_id);
     Ok(())
 }
 
@@ -216,7 +216,7 @@ pub(crate) fn signing_package(
 
 fn handle_r2_signing(
     swarm: &mut Libp2pSwarm<Behaviour>,
-    signer_db: Arc<DashMap<QueryId, Signer>>,
+    signer_db: &Arc<DashMap<QueryId, Signer>>,
     query_id: QueryId,
     data: Vec<u8>,
 ) -> Result<(), SwarmError> {
@@ -234,7 +234,7 @@ fn handle_r2_signing(
 
 fn handle_final_signing(
     swarm: &mut Libp2pSwarm<Behaviour>,
-    signer_db: Arc<DashMap<QueryId, Signer>>,
+    signer_db: &Arc<DashMap<QueryId, Signer>>,
     query_id: QueryId,
     identifier: Identifier,
     signature: round2::SignatureShare,
@@ -261,7 +261,7 @@ fn handle_final_signing(
 }
 
 pub(crate) fn send_signature(
-    output: flume::Sender<SwarmOutput>,
+    output: &flume::Sender<SwarmOutput>,
     signer_requester_db: &Arc<DashMap<QueryId, ReqSign>>,
     query_id: QueryId,
     signature: Signature,

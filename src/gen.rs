@@ -156,15 +156,15 @@ pub(crate) fn gen_start(
 }
 
 pub(crate) fn handle_generation_msg(
-    database: Arc<DashMap<Vec<u8>, DbData>>,
+    database: &Arc<DashMap<Vec<u8>, DbData>>,
     swarm: &mut Libp2pSwarm<Behaviour>,
-    generator_db: Arc<DashMap<QueryId, Generator>>,
+    generator_db: &Arc<DashMap<QueryId, Generator>>,
     message: GenerationMessage,
     propagation_source: PeerId,
     topic: TopicHash,
 ) -> Result<(), SwarmError> {
     let generator = generator_db
-        .get_mut(&topic.to_string())
+        .get_mut(topic.as_str())
         .ok_or(SwarmError::DatabaseError)?;
     match message {
         GenerationMessage::GenR1 => handle_r1_generation(swarm, generator, propagation_source)?,
@@ -201,7 +201,7 @@ fn handle_r2_generation(
 }
 
 fn handle_final_generation(
-    database: Arc<DashMap<Vec<u8>, DbData>>,
+    database: &Arc<DashMap<Vec<u8>, DbData>>,
     swarm: &mut Libp2pSwarm<Behaviour>,
     mut generator: RefMut<QueryId, Generator>,
     received_identifier: Identifier,
@@ -233,9 +233,9 @@ fn handle_final_generation(
 }
 
 pub(crate) fn send_final_gen(
-    output: flume::Sender<SwarmOutput>,
+    output: &flume::Sender<SwarmOutput>,
     generation_requester_db: &Arc<DashMap<QueryId, ReqGenerate>>,
-    database: Arc<DashMap<Vec<u8>, DbData>>,
+    database: &Arc<DashMap<Vec<u8>, DbData>>,
     query_id: QueryId,
     pubkey_package: PublicKeyPackage,
 ) -> Result<(), SwarmError> {

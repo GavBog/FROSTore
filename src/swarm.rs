@@ -237,7 +237,7 @@ pub(crate) fn create_libp2p_swarm(config: &Swarm) -> Result<Libp2pSwarm<Behaviou
         )
         .map_err(|_| SwarmError::ConfigurationError)?,
         identify: identify::Behaviour::new(identify::Config::new(
-            PROTOCOL_VERSION.clone(),
+            PROTOCOL_VERSION.to_string(),
             config.key.public(),
         )),
         kad: Kademlia::with_config(
