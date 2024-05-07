@@ -4,10 +4,8 @@ use crate::{
 };
 use frost_ed25519::{Signature, VerifyingKey};
 use futures::{channel::oneshot, future::BoxFuture};
-use libp2p::swarm::NetworkBehaviour;
 pub use libp2p::swarm::SwarmEvent;
 use libp2p::{
-    core::upgrade::Version,
     gossipsub, identify,
     kad::{
         store::MemoryStore, Behaviour as Kademlia, Config as KademliaConfig,
@@ -16,8 +14,9 @@ use libp2p::{
     noise,
     request_response::{self, ProtocolSupport},
     swarm::{Config as Libp2pConfig, StreamProtocol},
-    tcp, yamux, Multiaddr, Swarm as Libp2pSwarm, Transport,
+    tcp, yamux, Multiaddr, Swarm as Libp2pSwarm,
 };
+use libp2p::{swarm::NetworkBehaviour, SwarmBuilder};
 use rand::{distributions::Alphanumeric, Rng};
 use std::time::Duration;
 use thiserror::Error;
@@ -131,7 +130,9 @@ impl Swarm {
         self.output_rx = Some(output_rx);
         let frost_swarm = self.clone();
         self.executor.exec(Box::pin(async move {
-            let _ = start_swarm(input_rx, output_tx, frost_swarm).await;
+            start_swarm(input_rx, output_tx, frost_swarm)
+                .await
+                .expect("FROSTore Swarm ran into an error!");
         }));
         Ok(())
     }
@@ -228,52 +229,51 @@ impl Swarm {
 }
 
 pub(crate) fn create_libp2p_swarm(config: &Swarm) -> Result<Libp2pSwarm<Behaviour>, SwarmError> {
-    let behavior = Behaviour {
-        gossipsub: gossipsub::Behaviour::new(
-            gossipsub::MessageAuthenticity::Signed(config.key.clone()),
-            gossipsub::ConfigBuilder::default()
-                .build()
-                .map_err(|_| SwarmError::ConfigurationError)?,
-        )
-        .map_err(|_| SwarmError::ConfigurationError)?,
-        identify: identify::Behaviour::new(identify::Config::new(
-            PROTOCOL_VERSION.to_string(),
-            config.key.public(),
-        )),
-        kad: Kademlia::with_config(
-            config.key.public().to_peer_id(),
-            MemoryStore::new(config.key.public().to_peer_id()),
-            KademliaConfig::default(),
-        ),
-        req_res: request_response::cbor::Behaviour::new(
-            [(
-                StreamProtocol::new(&PROTOCOL_VERSION),
-                ProtocolSupport::Full,
-            )],
-            request_response::Config::default(),
-        ),
-    };
-    #[cfg(feature = "tokio")]
-    let transport = tcp::tokio::Transport::default();
-    #[cfg(not(feature = "tokio"))]
-    let transport = tcp::async_io::Transport::default();
+    let swarm = SwarmBuilder::with_existing_identity(config.key.clone());
 
-    let transport = transport
-        .upgrade(Version::V1Lazy)
-        .authenticate(
-            noise::Config::new(&config.key.clone()).map_err(|_| SwarmError::ConfigurationError)?,
-        )
-        .multiplex(yamux::Config::default())
-        .boxed();
+    #[cfg(feature = "tokio")]
+    let swarm = swarm.with_tokio();
+    #[cfg(not(feature = "tokio"))]
+    let swarm = swarm.with_async_std();
 
     let swarm_config = Libp2pConfig::with_executor(config.executor)
         .with_idle_connection_timeout(Duration::from_secs(60));
-    let mut swarm = Libp2pSwarm::new(
-        transport,
-        behavior,
-        config.key.public().to_peer_id(),
-        swarm_config,
-    );
+
+    let mut swarm = swarm
+        .with_tcp(
+            tcp::Config::default().nodelay(true),
+            noise::Config::new,
+            yamux::Config::default,
+        )
+        .map_err(|_| SwarmError::ConfigurationError)?
+        .with_quic()
+        .with_behaviour(|keypair| Behaviour {
+            gossipsub: gossipsub::Behaviour::new(
+                gossipsub::MessageAuthenticity::Signed(keypair.clone()),
+                gossipsub::ConfigBuilder::default().build().unwrap(),
+            )
+            .unwrap(),
+            identify: identify::Behaviour::new(identify::Config::new(
+                PROTOCOL_VERSION.clone(),
+                keypair.public(),
+            )),
+            kad: Kademlia::with_config(
+                keypair.public().to_peer_id(),
+                MemoryStore::new(keypair.public().to_peer_id()),
+                KademliaConfig::default(),
+            ),
+            req_res: request_response::cbor::Behaviour::new(
+                [(
+                    StreamProtocol::new(&PROTOCOL_VERSION),
+                    ProtocolSupport::Full,
+                )],
+                request_response::Config::default(),
+            ),
+        })
+        .map_err(|_| SwarmError::ConfigurationError)?
+        .with_swarm_config(|_| swarm_config)
+        .build();
+
     swarm.behaviour_mut().kad.set_mode(Some(Mode::Server));
     config.addresses.iter().for_each(|address| {
         let _ = swarm.listen_on(address.clone());
