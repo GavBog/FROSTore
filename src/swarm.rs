@@ -158,7 +158,7 @@ impl Swarm {
         &mut self,
         min_threshold: u16,
         total_peers: u16,
-    ) -> (QueryId, BoxFuture<'_, Result<VerifyingKey, SwarmError>>) {
+    ) -> Result<(QueryId, BoxFuture<'_, Result<VerifyingKey, SwarmError>>), SwarmError> {
         let (tx, rx) = oneshot::channel::<VerifyingKey>();
         let query_id = rand::thread_rng()
             .sample_iter(&Alphanumeric)
@@ -173,25 +173,26 @@ impl Swarm {
             },
             tx,
         );
-        (
+        let _ = self
+            .input_tx
+            .as_mut()
+            .ok_or(SwarmError::ConfigurationError)?
+            .send(send_message);
+
+        Ok((
             query_id,
             Box::pin(async move {
-                let _ = self
-                    .input_tx
-                    .as_mut()
-                    .ok_or(SwarmError::ConfigurationError)?
-                    .send(send_message);
                 let response = rx.await.map_err(|_| SwarmError::MessageProcessingError)?;
                 Ok(response)
             }),
-        )
+        ))
     }
 
     pub fn sign(
         &mut self,
         pubkey: VerifyingKey,
         message: Vec<u8>,
-    ) -> (QueryId, BoxFuture<'_, Result<Signature, SwarmError>>) {
+    ) -> Result<(QueryId, BoxFuture<'_, Result<Signature, SwarmError>>), SwarmError> {
         let (tx, rx) = oneshot::channel::<Signature>();
         let query_id = rand::thread_rng()
             .sample_iter(&Alphanumeric)
@@ -200,18 +201,19 @@ impl Swarm {
             .collect::<String>();
         let send_message =
             SwarmInput::Sign(query_id.clone(), tx, pubkey.serialize().to_vec(), message);
-        (
+        let _ = self
+            .input_tx
+            .as_mut()
+            .ok_or(SwarmError::ConfigurationError)?
+            .send(send_message);
+
+        Ok((
             query_id,
             Box::pin(async move {
-                let _ = self
-                    .input_tx
-                    .as_mut()
-                    .ok_or(SwarmError::ConfigurationError)?
-                    .send(send_message);
                 let response = rx.await.map_err(|_| SwarmError::MessageProcessingError)?;
                 Ok(response)
             }),
-        )
+        ))
     }
 }
 

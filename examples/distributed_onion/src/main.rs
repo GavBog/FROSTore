@@ -60,7 +60,7 @@ async fn main() -> Result<()> {
                             let message = args.collect::<Vec<_>>().join(" ").into_bytes();
 
                             // begin signing the message and store the request in the hashmap
-                            let id = swarm.sign(pubkey, message.clone()).0;
+                            let id = swarm.sign(pubkey, message.clone())?.0;
                             request_db.insert(id, (pubkey, message));
                             info!("Signing message!");
                         },
