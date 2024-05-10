@@ -51,7 +51,6 @@ pub enum SwarmInput {
     AddPeer(Multiaddr),
     Generate(QueryId, SignerConfig, oneshot::Sender<VerifyingKey>),
     Sign(QueryId, oneshot::Sender<Signature>, Vec<u8>, Vec<u8>),
-    Shutdown,
 }
 
 #[derive(Debug)]
@@ -60,7 +59,6 @@ pub enum SwarmOutput {
     Generation(QueryId, VerifyingKey),
     Signing(QueryId, Signature),
     SwarmEvents(SwarmEvent<BehaviourEvent>),
-    Shutdown,
 }
 
 #[derive(NetworkBehaviour)]
@@ -214,17 +212,6 @@ impl Swarm {
                 Ok(response)
             }),
         )
-    }
-
-    pub fn shutdown(&mut self) -> Result<(), SwarmError> {
-        self.input_tx
-            .as_mut()
-            .ok_or(SwarmError::ConfigurationError)?
-            .send(SwarmInput::Shutdown)
-            .map_err(|_| SwarmError::MessageProcessingError)?;
-        self.input_tx = None;
-        self.output_rx = None;
-        Ok(())
     }
 }
 

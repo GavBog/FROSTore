@@ -64,10 +64,6 @@ async fn main() -> Result<()> {
                             request_db.insert(id, (pubkey, message));
                             info!("Signing message!");
                         },
-                        line if (line == "CLOSE") => {
-                            info!("Shutting down...");
-                            swarm.shutdown()?;
-                        },
                         _ => {
                             warn!("Unknown command");
                         },
@@ -108,10 +104,6 @@ async fn main() -> Result<()> {
                                 },
                                 _ => { },
                             }
-                        },
-                        SwarmOutput::Shutdown => {
-                            info!("Closed");
-                            return Ok(());
                         },
                         // Print out any errors
                         SwarmOutput::Error(e) => match e {

@@ -104,11 +104,6 @@ async fn start_swarm(
                 &signer_requester_db,
                 &database,
             )?,
-            SwarmInput::Shutdown => {
-                return output
-                    .send(SwarmOutput::Shutdown)
-                    .map_err(|_| SwarmError::MessageProcessingError);
-            }
         }
         Ok(())
     };
@@ -249,10 +244,6 @@ async fn start_swarm(
         Ok(())
     };
 
-    let output_rx = frost_swarm
-        .output_rx
-        .ok_or(SwarmError::MessageProcessingError)?;
-
     // BEGIN MAIN LOOP
     loop {
         select! {
@@ -268,11 +259,6 @@ async fn start_swarm(
                     handle_event(event, &mut libp2p_swarm).unwrap_or_else(|e| {
                         let _ = output.send(SwarmOutput::Error(e));
                     });
-                }
-            },
-            output = output_rx.recv_async().fuse() => {
-                if let Ok(SwarmOutput::Shutdown) = output {
-                    return Ok(());
                 }
             },
         }
