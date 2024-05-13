@@ -77,14 +77,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("Finished adding peers");
 
     // Generate a new keypair on the network
-    let pubkey = swarm.generate(MIN_THRESHOLD, TOTAL_PEERS).1.await?;
+    let pubkey = swarm.generate(MIN_THRESHOLD, TOTAL_PEERS)?.1.await?;
     println!("Generated pubkey: {:?}", pubkey);
 
     // Sign some data
     let data = b"Hello, World!".to_vec();
     eprintln!("Signing data: {:?}", data);
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    let signature = swarm.sign(pubkey, data.clone()).1.await?;
+    let signature = swarm.sign(pubkey, data.clone())?.1.await?;
     println!("Signature: {:?}", signature);
 
     // Verify the signature
