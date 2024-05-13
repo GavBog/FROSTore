@@ -47,7 +47,7 @@ impl ReqGenerate {
                 .peers
                 .remove(rand::thread_rng().gen_range(0..self.peers.len()));
             self.selected_peers.push(peer);
-            let _ = swarm.behaviour_mut().req_res.send_request(
+            swarm.behaviour_mut().req_res.send_request(
                 &peer,
                 DirectMsgData::GenStart(self.query_id.clone(), self.signer_config.clone(), count),
             );
@@ -66,15 +66,19 @@ impl ReqGenerate {
     pub(crate) fn gen_r2(&mut self, swarm: &mut Libp2pSwarm<Behaviour>) -> Result<(), SwarmError> {
         let send_message = bincode::serialize(&MessageData::Generation(GenerationMessage::GenR1))
             .map_err(|_| SwarmError::MessageProcessingError)?;
-        let _ = swarm
+        swarm
             .behaviour_mut()
             .gossipsub
-            .publish(TopicHash::from_raw(self.query_id.clone()), send_message);
+            .publish(TopicHash::from_raw(self.query_id.clone()), send_message)
+            .map_err(|_| SwarmError::MessageProcessingError)?;
+
         Ok(())
     }
 
     pub(crate) fn send_response(self, response: VerifyingKey) -> Result<(), SwarmError> {
-        let _ = self.response_channel.send(response);
+        self.response_channel
+            .send(response)
+            .map_err(|_| SwarmError::MessageProcessingError)?;
         Ok(())
     }
 }
@@ -113,10 +117,14 @@ impl ReqSign {
             self.query_id.clone(),
         )))
         .map_err(|_| SwarmError::MessageProcessingError)?;
-        let _ = swarm.behaviour_mut().gossipsub.publish(
-            TopicHash::from_raw(b64.encode(self.pubkey.clone())),
-            send_message,
-        );
+        swarm
+            .behaviour_mut()
+            .gossipsub
+            .publish(
+                TopicHash::from_raw(b64.encode(self.pubkey.clone())),
+                send_message,
+            )
+            .map_err(|_| SwarmError::MessageProcessingError)?;
         Ok(())
     }
 
@@ -143,15 +151,21 @@ impl ReqSign {
                 .map_err(|_| SwarmError::MessageProcessingError)?,
         )))
         .map_err(|_| SwarmError::MessageProcessingError)?;
-        let _ = swarm.behaviour_mut().gossipsub.publish(
-            TopicHash::from_raw(b64.encode(self.pubkey.clone())),
-            send_message,
-        );
+        swarm
+            .behaviour_mut()
+            .gossipsub
+            .publish(
+                TopicHash::from_raw(b64.encode(self.pubkey.clone())),
+                send_message,
+            )
+            .map_err(|_| SwarmError::MessageProcessingError)?;
         Ok(())
     }
 
     pub(crate) fn send_response(self, response: Signature) -> Result<(), SwarmError> {
-        let _ = self.response_channel.send(response);
+        self.response_channel
+            .send(response)
+            .map_err(|_| SwarmError::MessageProcessingError)?;
         Ok(())
     }
 }
@@ -162,7 +176,11 @@ pub(crate) fn handle_add_peer_input(
 ) -> Result<(), SwarmError> {
     let peer = peerid_from_multiaddress(&multiaddress).ok_or(SwarmError::MessageProcessingError)?;
     swarm.behaviour_mut().kad.add_address(&peer, multiaddress);
-    let _ = swarm.behaviour_mut().kad.bootstrap();
+    swarm
+        .behaviour_mut()
+        .kad
+        .bootstrap()
+        .map_err(|_| SwarmError::InvalidPeer)?;
     Ok(())
 }
 

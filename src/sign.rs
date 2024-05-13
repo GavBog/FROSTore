@@ -55,7 +55,7 @@ impl Signer {
         let mut rng = rand::rngs::OsRng;
         let (nonces, commitments) = round1::commit(share, &mut rng);
         self.nonces = Some(nonces);
-        let _ = swarm.behaviour_mut().req_res.send_request(
+        swarm.behaviour_mut().req_res.send_request(
             &self.propagation_source,
             DirectMsgData::SigningPackage(
                 self.query_id.clone(),
@@ -99,10 +99,12 @@ impl Signer {
             signature,
         )))
         .map_err(|_| SwarmError::MessageProcessingError)?;
-        let _ = swarm
+        swarm
             .behaviour_mut()
             .gossipsub
-            .publish(self.topic.clone(), send_message);
+            .publish(self.topic.clone(), send_message)
+            .map_err(|_| SwarmError::MessageProcessingError)?;
+
         Ok(())
     }
 
@@ -302,7 +304,7 @@ fn return_sign(
     signer: RefMut<QueryId, Signer>,
     signature: Signature,
 ) -> Result<(), SwarmError> {
-    let _ = swarm.behaviour_mut().req_res.send_request(
+    swarm.behaviour_mut().req_res.send_request(
         &signer.propagation_source,
         DirectMsgData::ReturnSign(query_id, signature),
     );

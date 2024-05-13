@@ -104,6 +104,7 @@ async fn start_swarm(
                 &signer_requester_db,
                 &database,
             )?,
+            SwarmInput::Shutdown => {}
         }
         Ok(())
     };
@@ -251,6 +252,9 @@ async fn start_swarm(
         select! {
             recv = input.recv().fuse() => {
                 if let Ok(recv) = recv {
+                    if let SwarmInput::Shutdown = recv {
+                        return Ok(());
+                    }
                     handle_client_input(recv, &mut libp2p_swarm).unwrap_or_else(|e| {
                         let _ = output.try_send(SwarmOutput::Error(e));
                     });

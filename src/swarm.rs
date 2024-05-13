@@ -51,6 +51,7 @@ pub enum SwarmInput {
     AddPeer(Multiaddr),
     Generate(QueryId, SignerConfig, oneshot::Sender<VerifyingKey>),
     Sign(QueryId, oneshot::Sender<Signature>, Vec<u8>, Vec<u8>),
+    Shutdown,
 }
 
 #[derive(Debug)]
@@ -216,6 +217,20 @@ impl Swarm {
             }),
         ))
     }
+
+    pub fn shutdown(&mut self) -> Result<(), SwarmError> {
+        let send_message = SwarmInput::Shutdown;
+        self.input_tx
+            .as_mut()
+            .ok_or(SwarmError::ConfigurationError)?
+            .try_send(send_message)
+            .map_err(|_| SwarmError::MessageProcessingError)?;
+
+        self.input_tx = None;
+        self.output_rx = None;
+
+        Ok(())
+    }
 }
 
 pub(crate) fn create_libp2p_swarm(config: &Swarm) -> Result<Libp2pSwarm<Behaviour>, SwarmError> {
@@ -265,8 +280,10 @@ pub(crate) fn create_libp2p_swarm(config: &Swarm) -> Result<Libp2pSwarm<Behaviou
         .build();
 
     swarm.behaviour_mut().kad.set_mode(Some(Mode::Server));
-    config.addresses.iter().for_each(|address| {
-        let _ = swarm.listen_on(address.clone());
-    });
+    for address in config.addresses.iter() {
+        swarm
+            .listen_on(address.clone())
+            .map_err(|_| SwarmError::ConfigurationError)?;
+    }
     Ok(swarm)
 }

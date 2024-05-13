@@ -72,10 +72,11 @@ impl Generator {
             Box::new(round1_package),
         )))
         .map_err(|_| SwarmError::MessageProcessingError)?;
-        let _ = swarm
+        swarm
             .behaviour_mut()
             .gossipsub
-            .publish(self.topic.clone(), send_message);
+            .publish(self.topic.clone(), send_message)
+            .map_err(|_| SwarmError::MessageProcessingError)?;
         Ok(())
     }
 
@@ -101,10 +102,11 @@ impl Generator {
             GenerationMessage::GenFinal(self.identifier, round2_packages),
         ))
         .map_err(|_| SwarmError::MessageProcessingError)?;
-        let _ = swarm
+        swarm
             .behaviour_mut()
             .gossipsub
-            .publish(self.topic.clone(), send_message);
+            .publish(self.topic.clone(), send_message)
+            .map_err(|_| SwarmError::MessageProcessingError)?;
         Ok(())
     }
 
@@ -139,17 +141,22 @@ pub(crate) fn gen_start(
     signer_config: SignerConfig,
     participant_id: u16,
 ) -> Result<(), SwarmError> {
-    let _ = swarm.behaviour_mut().kad.bootstrap();
+    swarm
+        .behaviour_mut()
+        .kad
+        .bootstrap()
+        .map_err(|_| SwarmError::InvalidPeer)?;
     let generator = Generator::new(
         Identifier::try_from(participant_id).map_err(|_| SwarmError::MessageProcessingError)?,
         signer_config.clone(),
         TopicHash::from_raw(&query_id),
     );
     generator_db.insert(query_id.clone(), generator);
-    let _ = swarm
+    swarm
         .behaviour_mut()
         .gossipsub
-        .subscribe(&IdentTopic::new(&query_id));
+        .subscribe(&IdentTopic::new(&query_id))
+        .map_err(|_| SwarmError::MessageProcessingError)?;
 
     schedule_database_cleanup(executor, generator_db.clone(), query_id);
     Ok(())
@@ -214,10 +221,11 @@ fn handle_final_generation(
     if db_length + 1 >= generator.signer_config.max_signers as usize {
         let (pubkey_package, key_package) = generator.gen_final()?;
         let new_topic = b64.encode(pubkey_package.verifying_key().serialize());
-        let _ = swarm
+        swarm
             .behaviour_mut()
             .gossipsub
-            .subscribe(&IdentTopic::new(new_topic));
+            .subscribe(&IdentTopic::new(new_topic))
+            .map_err(|_| SwarmError::MessageProcessingError)?;
         return_gen(swarm, &mut generator, pubkey_package.clone())?;
         database.insert(
             pubkey_package.verifying_key().serialize().to_vec(),
@@ -270,7 +278,7 @@ fn return_gen(
     generator: &mut Generator,
     pubkey_package: PublicKeyPackage,
 ) -> Result<(), SwarmError> {
-    let _ = swarm.behaviour_mut().req_res.send_request(
+    swarm.behaviour_mut().req_res.send_request(
         &generator
             .propagation_source
             .ok_or(SwarmError::DatabaseError)?,
