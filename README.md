@@ -83,7 +83,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Sign some data
     let data = b"Hello, World!".to_vec();
     eprintln!("Signing data: {:?}", data);
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     let signature = swarm.sign(pubkey, data.clone())?.1.await?;
     println!("Signature: {:?}", signature);
 
