@@ -233,16 +233,18 @@ fn handle_final_generation(
 }
 
 pub(crate) fn send_final_gen(
-    output: &flume::Sender<SwarmOutput>,
+    output: &async_channel::Sender<SwarmOutput>,
     generation_requester_db: &Arc<DashMap<QueryId, ReqGenerate>>,
     database: &Arc<DashMap<Vec<u8>, DbData>>,
     query_id: QueryId,
     pubkey_package: PublicKeyPackage,
 ) -> Result<(), SwarmError> {
-    let _ = output.send(SwarmOutput::Generation(
-        query_id.clone(),
-        *pubkey_package.verifying_key(),
-    ));
+    output
+        .try_send(SwarmOutput::Generation(
+            query_id.clone(),
+            *pubkey_package.verifying_key(),
+        ))
+        .map_err(|_| SwarmError::MessageProcessingError)?;
     if !generation_requester_db.contains_key(&query_id) {
         return Ok(());
     }

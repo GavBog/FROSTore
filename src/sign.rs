@@ -261,12 +261,14 @@ fn handle_final_signing(
 }
 
 pub(crate) fn send_signature(
-    output: &flume::Sender<SwarmOutput>,
+    output: &async_channel::Sender<SwarmOutput>,
     signer_requester_db: &Arc<DashMap<QueryId, ReqSign>>,
     query_id: QueryId,
     signature: Signature,
 ) -> Result<(), SwarmError> {
-    let _ = output.send(SwarmOutput::Signing(query_id.clone(), signature));
+    output
+        .try_send(SwarmOutput::Signing(query_id.clone(), signature))
+        .map_err(|_| SwarmError::MessageProcessingError)?;
     if !signer_requester_db.contains_key(&query_id) {
         return Ok(());
     }

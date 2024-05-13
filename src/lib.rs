@@ -67,8 +67,8 @@ pub struct DbData {
 }
 
 async fn start_swarm(
-    input: flume::Receiver<SwarmInput>,
-    output: flume::Sender<SwarmOutput>,
+    input: async_channel::Receiver<SwarmInput>,
+    output: async_channel::Sender<SwarmOutput>,
     frost_swarm: FrostSwarm,
 ) -> Result<(), SwarmError> {
     let generation_requester_db = Arc::new(DashMap::<QueryId, ReqGenerate>::new());
@@ -238,7 +238,9 @@ async fn start_swarm(
                 handle_behavior_event(event, swarm)?;
             }
             _ => {
-                let _ = output.send(SwarmOutput::SwarmEvents(event));
+                output
+                    .try_send(SwarmOutput::SwarmEvents(event))
+                    .map_err(|_| SwarmError::MessageProcessingError)?;
             }
         }
         Ok(())
@@ -247,17 +249,17 @@ async fn start_swarm(
     // BEGIN MAIN LOOP
     loop {
         select! {
-            recv = input.recv_async().fuse() => {
+            recv = input.recv().fuse() => {
                 if let Ok(recv) = recv {
                     handle_client_input(recv, &mut libp2p_swarm).unwrap_or_else(|e| {
-                        let _ = output.send(SwarmOutput::Error(e));
+                        let _ = output.try_send(SwarmOutput::Error(e));
                     });
                 }
             },
             event = libp2p_swarm.next().fuse() => {
                 if let Some(event) = event {
                     handle_event(event, &mut libp2p_swarm).unwrap_or_else(|e| {
-                        let _ = output.send(SwarmOutput::Error(e));
+                        let _ = output.try_send(SwarmOutput::Error(e));
                     });
                 }
             },

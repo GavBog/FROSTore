@@ -104,8 +104,8 @@ impl From<request_response::Event<DirectMsgData, Vec<u8>>> for BehaviourEvent {
 
 #[derive(Debug, Clone)]
 pub struct Swarm {
-    pub input_tx: Option<flume::Sender<SwarmInput>>,
-    pub output_rx: Option<flume::Receiver<SwarmOutput>>,
+    pub input_tx: Option<async_channel::Sender<SwarmInput>>,
+    pub output_rx: Option<async_channel::Receiver<SwarmOutput>>,
     pub key: Keypair,
     pub addresses: Vec<Multiaddr>,
     pub executor: fn(BoxFuture<'static, ()>),
@@ -121,8 +121,8 @@ impl Swarm {
             return Err(SwarmError::ExecutionError);
         }
 
-        let (input_tx, input_rx) = flume::unbounded::<SwarmInput>();
-        let (output_tx, output_rx) = flume::unbounded::<SwarmOutput>();
+        let (input_tx, input_rx) = async_channel::unbounded::<SwarmInput>();
+        let (output_tx, output_rx) = async_channel::unbounded::<SwarmOutput>();
 
         self.input_tx = Some(input_tx);
         self.output_rx = Some(output_rx);
@@ -139,18 +139,19 @@ impl Swarm {
         self.output_rx
             .as_mut()
             .ok_or(SwarmError::ConfigurationError)?
-            .recv_async()
+            .recv()
             .await
             .map_err(|_| SwarmError::MessageProcessingError)
     }
 
     pub fn add_peer(&mut self, multiaddr: Multiaddr) -> Result<(), SwarmError> {
         let send_message = SwarmInput::AddPeer(multiaddr);
-        let _ = self
-            .input_tx
+        self.input_tx
             .as_mut()
             .ok_or(SwarmError::ConfigurationError)?
-            .send(send_message);
+            .try_send(send_message)
+            .map_err(|_| SwarmError::MessageProcessingError)?;
+
         Ok(())
     }
 
@@ -173,11 +174,11 @@ impl Swarm {
             },
             tx,
         );
-        let _ = self
-            .input_tx
+        self.input_tx
             .as_mut()
             .ok_or(SwarmError::ConfigurationError)?
-            .send(send_message);
+            .try_send(send_message)
+            .map_err(|_| SwarmError::MessageProcessingError)?;
 
         Ok((
             query_id,
@@ -201,11 +202,11 @@ impl Swarm {
             .collect::<String>();
         let send_message =
             SwarmInput::Sign(query_id.clone(), tx, pubkey.serialize().to_vec(), message);
-        let _ = self
-            .input_tx
+        self.input_tx
             .as_mut()
             .ok_or(SwarmError::ConfigurationError)?
-            .send(send_message);
+            .try_send(send_message)
+            .map_err(|_| SwarmError::MessageProcessingError)?;
 
         Ok((
             query_id,
