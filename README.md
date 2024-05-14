@@ -52,27 +52,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Add the boot nodes to the client
     for boot_node in BOOT_NODES.iter() {
         let multiaddr: Multiaddr = boot_node.parse()?;
-        swarm.add_peer(multiaddr)?;
-    }
-
-    // Wait for the client to connect to enough peers
-    let mut peer_count = 0;
-    loop {
-        // Wait for the next event
-        let event = swarm.next().await.unwrap();
-        // If the event is a connection established event, increment the peer count
-        if let swarm::SwarmOutput::SwarmEvents(swarm::SwarmEvent::ConnectionEstablished {
-            peer_id,
-            ..
-        }) = event
-        {
-            eprintln!("Connected to peer: {}", peer_id);
-            peer_count += 1;
-            eprintln!("Peer count: {}", peer_count);
-        }
-        if peer_count >= TOTAL_PEERS {
-            break;
-        }
+        eprintln!("Adding peer: {:?}", multiaddr);
+        swarm.add_peer(multiaddr)?.await?;
     }
     eprintln!("Finished adding peers");
 
