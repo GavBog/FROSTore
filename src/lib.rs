@@ -15,13 +15,13 @@ use frost_ed25519::{
     Identifier,
 };
 pub use frost_ed25519::{Signature, VerifyingKey};
-use futures::{select, FutureExt, StreamExt};
+use futures::{channel::oneshot, select, FutureExt, StreamExt};
 use libp2p::{
     gossipsub::{self, Event as GossipsubEvent},
     identify,
     request_response::{self, Message as ReqResMessage, ResponseChannel},
     swarm::SwarmEvent,
-    Swarm as Libp2pSwarm,
+    PeerId, Swarm as Libp2pSwarm,
 };
 pub use libp2p::{
     identity::Keypair, multiaddr::Protocol as MultiaddrProtocol, swarm::Executor, Multiaddr,
@@ -66,16 +66,41 @@ pub struct DbData {
     signer_config: Option<SignerConfig>,
 }
 
+struct SwarmState {
+    add_peer_db: Arc<DashMap<PeerId, oneshot::Sender<()>>>,
+    generation_requester_db: Arc<DashMap<QueryId, ReqGenerate>>,
+    generator_db: Arc<DashMap<QueryId, Generator>>,
+    signer_db: Arc<DashMap<QueryId, Signer>>,
+    signer_requester_db: Arc<DashMap<QueryId, ReqSign>>,
+    database: Arc<DashMap<Vec<u8>, DbData>>,
+}
+
+impl Default for SwarmState {
+    fn default() -> Self {
+        Self {
+            add_peer_db: Arc::new(DashMap::new()),
+            generation_requester_db: Arc::new(DashMap::new()),
+            generator_db: Arc::new(DashMap::new()),
+            signer_db: Arc::new(DashMap::new()),
+            signer_requester_db: Arc::new(DashMap::new()),
+            database: Arc::new(DashMap::new()),
+        }
+    }
+}
+
 async fn start_swarm(
     input: async_channel::Receiver<SwarmInput>,
     output: async_channel::Sender<SwarmOutput>,
     frost_swarm: FrostSwarm,
 ) -> Result<(), SwarmError> {
-    let generation_requester_db = Arc::new(DashMap::<QueryId, ReqGenerate>::new());
-    let generator_db = Arc::new(DashMap::<QueryId, Generator>::new());
-    let signer_db = Arc::new(DashMap::<QueryId, Signer>::new());
-    let signer_requester_db = Arc::new(DashMap::<QueryId, ReqSign>::new());
-    let database = Arc::new(DashMap::<Vec<u8>, DbData>::new());
+    let SwarmState {
+        add_peer_db,
+        generation_requester_db,
+        generator_db,
+        signer_db,
+        signer_requester_db,
+        database,
+    } = SwarmState::default();
 
     let mut libp2p_swarm = create_libp2p_swarm(&frost_swarm)?;
     let executor = frost_swarm.executor;
@@ -85,7 +110,9 @@ async fn start_swarm(
                                swarm: &mut Libp2pSwarm<Behaviour>|
      -> Result<(), SwarmError> {
         match input {
-            SwarmInput::AddPeer(peer_address) => input::handle_add_peer_input(peer_address, swarm)?,
+            SwarmInput::AddPeer(peer_address, resp_channel) => {
+                input::handle_add_peer_input(peer_address, &add_peer_db, resp_channel, swarm)?
+            }
             SwarmInput::Generate(req_id, signer_conf, resp_channel) => {
                 input::handle_generate_input(
                     req_id,
@@ -239,6 +266,14 @@ async fn start_swarm(
                 handle_behavior_event(event, swarm)?;
             }
             _ => {
+                if let swarm::SwarmEvent::ConnectionEstablished { peer_id, .. } = event {
+                    if let Some(sender) = add_peer_db.remove(&peer_id) {
+                        sender
+                            .1
+                            .send(())
+                            .map_err(|_| SwarmError::MessageProcessingError)?;
+                    }
+                }
                 output
                     .try_send(SwarmOutput::SwarmEvents(event))
                     .map_err(|_| SwarmError::MessageProcessingError)?;

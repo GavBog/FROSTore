@@ -172,6 +172,8 @@ impl ReqSign {
 
 pub(crate) fn handle_add_peer_input(
     multiaddress: Multiaddr,
+    add_peer_db: &DashMap<PeerId, oneshot::Sender<()>>,
+    response_channel: oneshot::Sender<()>,
     swarm: &mut Libp2pSwarm<Behaviour>,
 ) -> Result<(), SwarmError> {
     let peer = peerid_from_multiaddress(&multiaddress).ok_or(SwarmError::MessageProcessingError)?;
@@ -181,6 +183,8 @@ pub(crate) fn handle_add_peer_input(
         .kad
         .bootstrap()
         .map_err(|_| SwarmError::InvalidPeer)?;
+
+    add_peer_db.insert(peer, response_channel);
     Ok(())
 }
 

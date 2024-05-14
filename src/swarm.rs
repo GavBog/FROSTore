@@ -48,7 +48,7 @@ pub enum SwarmError {
 
 #[derive(Debug)]
 pub enum SwarmInput {
-    AddPeer(Multiaddr),
+    AddPeer(Multiaddr, oneshot::Sender<()>),
     Generate(QueryId, SignerConfig, oneshot::Sender<VerifyingKey>),
     Sign(QueryId, oneshot::Sender<Signature>, Vec<u8>, Vec<u8>),
     Shutdown,
@@ -145,15 +145,21 @@ impl Swarm {
             .map_err(|_| SwarmError::MessageProcessingError)
     }
 
-    pub fn add_peer(&mut self, multiaddr: Multiaddr) -> Result<(), SwarmError> {
-        let send_message = SwarmInput::AddPeer(multiaddr);
+    pub fn add_peer(
+        &mut self,
+        multiaddr: Multiaddr,
+    ) -> Result<BoxFuture<'_, Result<(), SwarmError>>, SwarmError> {
+        let (tx, rx) = oneshot::channel::<()>();
+        let send_message = SwarmInput::AddPeer(multiaddr, tx);
         self.input_tx
             .as_mut()
             .ok_or(SwarmError::ConfigurationError)?
             .try_send(send_message)
             .map_err(|_| SwarmError::MessageProcessingError)?;
 
-        Ok(())
+        Ok(Box::pin(async move {
+            rx.await.map_err(|_| SwarmError::MessageProcessingError)
+        }))
     }
 
     pub fn generate(

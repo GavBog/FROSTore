@@ -31,8 +31,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Add the boot nodes to the client
     for boot_node in BOOT_NODES.iter() {
-        let multiaddr: Multiaddr = boot_node.parse().unwrap();
-        swarm.add_peer(multiaddr).unwrap();
+        let multiaddr: Multiaddr = boot_node.parse()?;
+        let _ = swarm.add_peer(multiaddr)?;
     }
 
     let app = Router::new()
@@ -46,13 +46,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap();
     info!(
         "FROSTore Web Service Listening on {}",
-        listener.local_addr().unwrap()
+        listener.local_addr()?
     );
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
     loop {
-        let message = swarm.next().await.unwrap();
+        let message = swarm.next().await?;
         trace!("{:?}", message);
         match message {
             SwarmOutput::SwarmEvents(SwarmEvent::NewListenAddr { address, .. }) => {

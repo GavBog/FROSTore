@@ -40,7 +40,7 @@ async fn main() -> Result<()> {
                             let multiaddr: Multiaddr = args.next().unwrap().parse()?;
 
                             // add the peer to the swarm network
-                            swarm.add_peer(multiaddr.clone())?;
+                            let _ = swarm.add_peer(multiaddr.clone())?;
                             info!("Added peer: {}", multiaddr);
                         },
                         // Begin generation of a new keypair using DKG (Distributed Key Generation) on the swarm network
