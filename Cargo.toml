@@ -24,7 +24,6 @@ libp2p = { version = "0.53", features = [
   "gossipsub",
   "identify",
   "kad",
-  "macros",
   "noise",
   "quic",
   "request-response",

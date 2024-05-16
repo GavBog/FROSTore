@@ -10,12 +10,9 @@ pub static PROTOCOL_VERSION: Lazy<String> =
     Lazy::new(|| format!("/FROSTore/{}", env!("CARGO_PKG_VERSION")));
 
 pub(crate) fn peerid_from_multiaddress(multiaddr: &Multiaddr) -> Option<PeerId> {
-    multiaddr.iter().find_map(|protocol| {
-        if let MultiaddrProtocol::P2p(peer) = protocol {
-            Some(peer)
-        } else {
-            None
-        }
+    multiaddr.iter().find_map(|protocol| match protocol {
+        MultiaddrProtocol::P2p(peer_id) => Some(peer_id),
+        _ => None,
     })
 }
 
