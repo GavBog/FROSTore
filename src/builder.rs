@@ -1,6 +1,7 @@
 use crate::{swarm::Swarm, Keypair, Multiaddr};
 use futures::future::BoxFuture;
 
+/// Builder for the `Swarm` struct.
 pub struct Builder {
     pub key: Keypair,
     pub addresses: Vec<Multiaddr>,

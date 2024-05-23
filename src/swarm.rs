@@ -22,6 +22,8 @@ use std::time::Duration;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
+/// Errors that can occur in the Swarm
+/// Errors are returned from the Swarm in SwarmOutput(Error)
 pub enum SwarmError {
     // Task related errors
     #[error("Generation Error")]
@@ -47,18 +49,29 @@ pub enum SwarmError {
 }
 
 #[derive(Debug)]
+/// The input to the Swarm
 pub enum SwarmInput {
+    /// Add a peer to the network
     AddPeer(Multiaddr, oneshot::Sender<()>),
+    /// Generate a new public key with Distributed Key Generation
     Generate(QueryId, SignerConfig, oneshot::Sender<VerifyingKey>),
+    /// Sign a message with the given public key
     Sign(QueryId, oneshot::Sender<Signature>, Vec<u8>, Vec<u8>),
+    /// Shutdown the Swarm
     Shutdown,
 }
 
 #[derive(Debug)]
+/// The output of the Swarm
+/// Swarm Output is returned from Swarm.next()
 pub enum SwarmOutput {
+    /// Error produced by the Swarm
     Error(SwarmError),
+    /// Returns pubkey from Distributed Key Generation
     Generation(QueryId, VerifyingKey),
+    /// Returns signature of the signed message
     Signing(QueryId, Signature),
+    /// Miscellaneous events from the Swarm
     SwarmEvents(SwarmEvent<BehaviourEvent>),
 }
 
@@ -72,6 +85,7 @@ pub(crate) struct Behaviour {
 }
 
 #[derive(Debug)]
+/// Events that can be produced by the Backend Libp2pSwarm Swarm
 pub enum BehaviourEvent {
     Gossipsub(gossipsub::Event),
     Identify(identify::Event),
@@ -104,6 +118,7 @@ impl From<request_response::Event<DirectMsgData, Vec<u8>>> for BehaviourEvent {
 }
 
 #[derive(Debug, Clone)]
+/// The running instance of the FROSTore Swarm
 pub struct Swarm {
     pub input_tx: Option<async_channel::Sender<SwarmInput>>,
     pub output_rx: Option<async_channel::Receiver<SwarmOutput>>,
@@ -113,10 +128,12 @@ pub struct Swarm {
 }
 
 impl Swarm {
+    /// Return a new Swarm Builder
     pub fn builder() -> Builder {
         Builder::default()
     }
 
+    /// Execute the Swarm
     pub fn exec(&mut self) -> Result<(), SwarmError> {
         if self.input_tx.is_some() || self.output_rx.is_some() {
             return Err(SwarmError::ExecutionError);
@@ -136,6 +153,7 @@ impl Swarm {
         Ok(())
     }
 
+    /// Get the next event from the network
     pub async fn next(&mut self) -> Result<SwarmOutput, SwarmError> {
         self.output_rx
             .as_mut()
@@ -145,6 +163,7 @@ impl Swarm {
             .map_err(|_| SwarmError::MessageProcessingError)
     }
 
+    /// Add a peer to the network
     pub fn add_peer(
         &mut self,
         multiaddr: Multiaddr,
@@ -162,6 +181,9 @@ impl Swarm {
         }))
     }
 
+    /// Generate a new public key with Distributed Key Generation
+    /// The public key is returned as a result
+    /// The private key is stored by the network
     pub fn generate(
         &mut self,
         min_threshold: u16,
@@ -196,6 +218,7 @@ impl Swarm {
         ))
     }
 
+    /// Sign a message with the given public key
     pub fn sign(
         &mut self,
         pubkey: VerifyingKey,
@@ -224,6 +247,7 @@ impl Swarm {
         ))
     }
 
+    /// Shutdown the Swarm
     pub fn shutdown(&mut self) -> Result<(), SwarmError> {
         let send_message = SwarmInput::Shutdown;
         self.input_tx

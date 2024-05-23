@@ -29,26 +29,41 @@ pub use libp2p::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+/// Builder for the Swarm
 pub mod builder;
+/// Swarm Key Generation methods and data structures
 pub mod gen;
+/// Client input methods and data structures for interacting with the Swarm
 pub mod input;
+/// Swarm Message Signing methods and data structures
 pub mod sign;
+/// Swarm data structures
 pub mod swarm;
+/// Miscellaneous utilities
 pub mod utils;
 
 type QueryId = String;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+/// Configuration for the signers
 pub struct SignerConfig {
+    /// The total number of peers that hold a part of the of the secret key
     max_signers: u16,
+    /// The minimum threshold of signers required to sign a message
     min_signers: u16,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+/// Data sent between peers on the network
+/// All data is sent as a DirectMessage is a request-response pattern
 pub enum DirectMsgData {
+    /// Start the generation process
     GenStart(QueryId, SignerConfig, u16),
+    /// Return the generated public_key key package
     ReturnGen(QueryId, PublicKeyPackage),
+    /// Return the signature
     ReturnSign(QueryId, Signature),
+    /// Send signing commitments to the signature requester
     SigningPackage(QueryId, Identifier, SigningCommitments),
 }
 
@@ -59,6 +74,7 @@ enum MessageData {
 }
 
 #[derive(Clone)]
+/// Long term state of the Swarm
 pub struct DbData {
     identifier: Option<Identifier>,
     key_package: Option<KeyPackage>,
