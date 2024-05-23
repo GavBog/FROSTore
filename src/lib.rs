@@ -110,14 +110,19 @@ async fn start_swarm(
                                swarm: &mut Libp2pSwarm<Behaviour>|
      -> Result<(), SwarmError> {
         match input {
-            SwarmInput::AddPeer(peer_address, resp_channel) => {
-                input::handle_add_peer_input(peer_address, &add_peer_db, resp_channel, swarm)?
-            }
+            SwarmInput::AddPeer(peer_address, resp_channel) => input::handle_add_peer_input(
+                peer_address,
+                &add_peer_db,
+                resp_channel,
+                executor,
+                swarm,
+            )?,
             SwarmInput::Generate(req_id, signer_conf, resp_channel) => {
                 input::handle_generate_input(
                     req_id,
                     signer_conf,
                     resp_channel,
+                    executor,
                     swarm,
                     &generation_requester_db,
                 )?
@@ -127,6 +132,7 @@ async fn start_swarm(
                 resp_channel,
                 public_key,
                 msg,
+                executor,
                 swarm,
                 &signer_requester_db,
                 &database,

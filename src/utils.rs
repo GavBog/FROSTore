@@ -1,10 +1,10 @@
-use crate::{Behaviour, Multiaddr, MultiaddrProtocol, QueryId};
+use crate::{Behaviour, Multiaddr, MultiaddrProtocol};
 use async_io::Timer;
 use dashmap::DashMap;
 use futures::future::BoxFuture;
 use libp2p::{swarm::Executor, PeerId, Swarm as Libp2pSwarm};
 use once_cell::sync::Lazy;
-use std::{sync::Arc, time::Duration};
+use std::{hash::Hash, sync::Arc, time::Duration};
 
 pub static PROTOCOL_VERSION: Lazy<String> =
     Lazy::new(|| format!("/FROSTore/{}", env!("CARGO_PKG_VERSION")));
@@ -30,13 +30,16 @@ pub(crate) fn get_peers_list(swarm: &mut Libp2pSwarm<Behaviour>) -> Vec<PeerId> 
         .collect::<Vec<_>>()
 }
 
-pub(crate) fn schedule_database_cleanup<T: Send + Sync + 'static>(
+pub(crate) fn schedule_database_cleanup<
+    K: Hash + Eq + Send + Sync + 'static,
+    V: Send + Sync + 'static,
+>(
     executor: fn(BoxFuture<'static, ()>),
-    db: Arc<DashMap<QueryId, T>>,
-    query_id: QueryId,
+    db: Arc<DashMap<K, V>>,
+    key: K,
 ) {
     executor.exec(Box::pin(async move {
         Timer::after(Duration::from_secs(120)).await;
-        let _ = db.remove(&query_id);
+        let _ = db.remove(&key);
     }));
 }

@@ -1,16 +1,16 @@
 use crate::{
     swarm::SwarmError,
-    utils::{get_peers_list, peerid_from_multiaddress},
+    utils::{get_peers_list, peerid_from_multiaddress, schedule_database_cleanup},
     Behaviour, DbData, DirectMsgData, GenerationMessage, MessageData, Multiaddr, QueryId,
     SignerConfig, SigningMessage,
 };
 use base64::{engine::general_purpose::STANDARD_NO_PAD as b64, Engine as Base64Engine};
 use dashmap::DashMap;
 use frost_ed25519::{round1, Identifier, Signature, SigningPackage, VerifyingKey};
-use futures::channel::oneshot;
+use futures::{channel::oneshot, future::BoxFuture};
 use libp2p::{gossipsub::TopicHash, PeerId, Swarm as Libp2pSwarm};
 use rand::Rng;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 pub(crate) struct ReqGenerate {
     peers: Vec<PeerId>,
@@ -172,8 +172,9 @@ impl ReqSign {
 
 pub(crate) fn handle_add_peer_input(
     multiaddress: Multiaddr,
-    add_peer_db: &DashMap<PeerId, oneshot::Sender<()>>,
+    add_peer_db: &Arc<DashMap<PeerId, oneshot::Sender<()>>>,
     response_channel: oneshot::Sender<()>,
+    executor: fn(BoxFuture<'static, ()>),
     swarm: &mut Libp2pSwarm<Behaviour>,
 ) -> Result<(), SwarmError> {
     let peer = peerid_from_multiaddress(&multiaddress).ok_or(SwarmError::MessageProcessingError)?;
@@ -185,6 +186,8 @@ pub(crate) fn handle_add_peer_input(
         .map_err(|_| SwarmError::InvalidPeer)?;
 
     add_peer_db.insert(peer, response_channel);
+
+    schedule_database_cleanup(executor, add_peer_db.clone(), peer);
     Ok(())
 }
 
@@ -192,8 +195,9 @@ pub(crate) fn handle_generate_input(
     query_id: QueryId,
     signer_config: SignerConfig,
     response_channel: oneshot::Sender<VerifyingKey>,
+    executor: fn(BoxFuture<'static, ()>),
     swarm: &mut Libp2pSwarm<Behaviour>,
-    generation_requester_db: &DashMap<QueryId, ReqGenerate>,
+    generation_requester_db: &Arc<DashMap<QueryId, ReqGenerate>>,
 ) -> Result<(), SwarmError> {
     let peer_list = get_peers_list(swarm);
     let mut generate_request = ReqGenerate::new(
@@ -204,6 +208,8 @@ pub(crate) fn handle_generate_input(
     );
     generate_request.gen_r1(swarm)?;
     generation_requester_db.insert(query_id.clone(), generate_request);
+
+    schedule_database_cleanup(executor, generation_requester_db.clone(), query_id);
     Ok(())
 }
 
@@ -212,8 +218,9 @@ pub(crate) fn handle_sign_input(
     response_channel: oneshot::Sender<Signature>,
     public_key: Vec<u8>,
     message: Vec<u8>,
+    executor: fn(BoxFuture<'static, ()>),
     swarm: &mut Libp2pSwarm<Behaviour>,
-    signer_requester_db: &DashMap<QueryId, ReqSign>,
+    signer_requester_db: &Arc<DashMap<QueryId, ReqSign>>,
     database: &DashMap<Vec<u8>, DbData>,
 ) -> Result<(), SwarmError> {
     let signer_config = database
@@ -228,6 +235,8 @@ pub(crate) fn handle_sign_input(
         signer_config,
     );
     sign_requester.sign_r1(swarm)?;
-    signer_requester_db.insert(query_id, sign_requester);
+    signer_requester_db.insert(query_id.clone(), sign_requester);
+
+    schedule_database_cleanup(executor, signer_requester_db.clone(), query_id);
     Ok(())
 }
