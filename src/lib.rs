@@ -1,7 +1,7 @@
 pub use crate::swarm::Swarm;
 use crate::{
+    client::{ReqGenerate, ReqSign},
     gen::{gen_start, send_final_gen, GenerationMessage, Generator},
-    input::{ReqGenerate, ReqSign},
     sign::{send_signature, signing_package, Signer, SigningMessage},
     swarm::{
         create_libp2p_swarm, Behaviour, BehaviourEvent, Swarm as FrostSwarm, SwarmError,
@@ -31,10 +31,10 @@ use std::sync::Arc;
 
 /// Builder for the Swarm
 pub mod builder;
+/// Client input methods and data structures for interacting with the Swarm
+pub mod client;
 /// Swarm Key Generation methods and data structures
 pub mod gen;
-/// Client input methods and data structures for interacting with the Swarm
-pub mod input;
 /// Swarm Message Signing methods and data structures
 pub mod sign;
 /// Swarm data structures
@@ -126,7 +126,7 @@ async fn start_swarm(
                                swarm: &mut Libp2pSwarm<Behaviour>|
      -> Result<(), SwarmError> {
         match input {
-            SwarmInput::AddPeer(peer_address, resp_channel) => input::handle_add_peer_input(
+            SwarmInput::AddPeer(peer_address, resp_channel) => client::handle_add_peer_input(
                 peer_address,
                 &add_peer_db,
                 resp_channel,
@@ -134,7 +134,7 @@ async fn start_swarm(
                 swarm,
             )?,
             SwarmInput::Generate(req_id, signer_conf, resp_channel) => {
-                input::handle_generate_input(
+                client::handle_generate_input(
                     req_id,
                     signer_conf,
                     resp_channel,
@@ -143,7 +143,7 @@ async fn start_swarm(
                     &generation_requester_db,
                 )?
             }
-            SwarmInput::Sign(req_id, resp_channel, public_key, msg) => input::handle_sign_input(
+            SwarmInput::Sign(req_id, resp_channel, public_key, msg) => client::handle_sign_input(
                 req_id,
                 resp_channel,
                 public_key,

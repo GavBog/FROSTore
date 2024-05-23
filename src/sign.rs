@@ -1,5 +1,5 @@
 use crate::{
-    input::ReqSign, swarm::SwarmError, utils::schedule_database_cleanup, Behaviour, DbData,
+    client::ReqSign, swarm::SwarmError, utils::schedule_database_cleanup, Behaviour, DbData,
     DirectMsgData, MessageData, QueryId, SwarmOutput,
 };
 use base64::{engine::general_purpose::STANDARD_NO_PAD as b64, Engine as Base64Engine};
