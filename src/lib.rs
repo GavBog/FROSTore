@@ -19,7 +19,7 @@ use futures::{channel::oneshot, select, FutureExt, StreamExt};
 use libp2p::{
     gossipsub::{self, Event as GossipsubEvent},
     identify,
-    request_response::{self, Message as ReqResMessage, ResponseChannel},
+    request_response::{self, Message as ReqResMessage},
     swarm::SwarmEvent,
     PeerId, Swarm as Libp2pSwarm,
 };
@@ -58,7 +58,7 @@ pub struct SignerConfig {
 /// All data is sent as a DirectMessage is a request-response pattern
 pub enum DirectMsgData {
     /// Start the generation process
-    GenStart(QueryId, SignerConfig, u16),
+    GenStart(QueryId, Vec<String>, SignerConfig, u16),
     /// Return the generated public_key key package
     ReturnGen(QueryId, PublicKeyPackage),
     /// Return the signature
@@ -211,45 +211,44 @@ async fn start_swarm(
             }
             Ok(())
         };
-    let handle_request_event = |message: DirectMsgData,
-                                _channel: ResponseChannel<Vec<u8>>,
-                                swarm: &mut Libp2pSwarm<Behaviour>|
-     -> Result<(), SwarmError> {
-        match message {
-            DirectMsgData::GenStart(query_id, signer_config, participant_id) => {
-                gen_start(
-                    executor,
-                    &generator_db,
-                    swarm,
-                    query_id,
-                    signer_config,
-                    participant_id,
-                )?;
+    let handle_request_event =
+        |message: DirectMsgData, swarm: &mut Libp2pSwarm<Behaviour>| -> Result<(), SwarmError> {
+            match message {
+                DirectMsgData::GenStart(query_id, peer_list, signer_config, participant_id) => {
+                    gen_start(
+                        executor,
+                        &generator_db,
+                        swarm,
+                        query_id,
+                        signer_config,
+                        participant_id,
+                        peer_list,
+                    )?;
+                }
+                DirectMsgData::ReturnGen(query_id, pubkey_package) => {
+                    send_final_gen(
+                        &output,
+                        &generation_requester_db,
+                        &database,
+                        query_id,
+                        pubkey_package,
+                    )?;
+                }
+                DirectMsgData::ReturnSign(query_id, signature) => {
+                    send_signature(&output, &signer_requester_db, query_id, signature)?;
+                }
+                DirectMsgData::SigningPackage(query_id, identifier, signing_commitments) => {
+                    signing_package(
+                        &signer_requester_db,
+                        swarm,
+                        query_id,
+                        identifier,
+                        signing_commitments,
+                    )?;
+                }
             }
-            DirectMsgData::ReturnGen(query_id, pubkey_package) => {
-                send_final_gen(
-                    &output,
-                    &generation_requester_db,
-                    &database,
-                    query_id,
-                    pubkey_package,
-                )?;
-            }
-            DirectMsgData::ReturnSign(query_id, signature) => {
-                send_signature(&output, &signer_requester_db, query_id, signature)?;
-            }
-            DirectMsgData::SigningPackage(query_id, identifier, signing_commitments) => {
-                signing_package(
-                    &signer_requester_db,
-                    swarm,
-                    query_id,
-                    identifier,
-                    signing_commitments,
-                )?;
-            }
-        }
-        Ok(())
-    };
+            Ok(())
+        };
     let handle_behavior_event =
         |event: BehaviourEvent, swarm: &mut Libp2pSwarm<Behaviour>| -> Result<(), SwarmError> {
             match event {
@@ -267,14 +266,11 @@ async fn start_swarm(
                 BehaviourEvent::Kademlia(_) => {}
                 BehaviourEvent::RequestResponse(event) => {
                     if let request_response::Event::Message {
-                        message:
-                            ReqResMessage::Request {
-                                request, channel, ..
-                            },
+                        message: ReqResMessage::Request { request, .. },
                         ..
                     } = event
                     {
-                        handle_request_event(request, channel, swarm)?;
+                        handle_request_event(request, swarm)?;
                     }
                 }
             }

@@ -26,6 +26,7 @@ pub(crate) enum GenerationMessage {
 pub(crate) struct Generator {
     pub(crate) identifier: Identifier,
     pub(crate) propagation_source: Option<PeerId>,
+    pub(crate) peer_list: Vec<PeerId>,
     pub(crate) signer_config: SignerConfig,
     pub(crate) topic: TopicHash,
     round1_secret_package: Option<dkg::round1::SecretPackage>,
@@ -37,12 +38,14 @@ pub(crate) struct Generator {
 impl Generator {
     pub(crate) fn new(
         identifier: Identifier,
+        peer_list: Vec<PeerId>,
         signer_config: SignerConfig,
         topic: TopicHash,
     ) -> Self {
         Self {
             identifier,
             propagation_source: None,
+            peer_list,
             signer_config,
             topic,
             round1_secret_package: None,
@@ -140,14 +143,20 @@ pub(crate) fn gen_start(
     query_id: QueryId,
     signer_config: SignerConfig,
     participant_id: u16,
+    peer_list: Vec<String>,
 ) -> Result<(), SwarmError> {
     swarm
         .behaviour_mut()
         .kad
         .bootstrap()
         .map_err(|_| SwarmError::InvalidPeer)?;
+    let peer_list = peer_list
+        .iter()
+        .map(|peer| peer.parse().map_err(|_| SwarmError::MessageProcessingError))
+        .collect::<Result<Vec<PeerId>, SwarmError>>()?;
     let generator = Generator::new(
         Identifier::try_from(participant_id).map_err(|_| SwarmError::MessageProcessingError)?,
+        peer_list,
         signer_config.clone(),
         TopicHash::from_raw(&query_id),
     );
@@ -176,11 +185,16 @@ pub(crate) fn handle_generation_msg(
     match message {
         GenerationMessage::GenR1 => handle_r1_generation(swarm, generator, propagation_source)?,
         GenerationMessage::GenR2(identifier, package) => {
-            handle_r2_generation(swarm, generator, identifier, *package)?
+            handle_r2_generation(swarm, generator, identifier, *package, propagation_source)?
         }
-        GenerationMessage::GenFinal(received_identifier, packages) => {
-            handle_final_generation(database, swarm, generator, received_identifier, packages)?
-        }
+        GenerationMessage::GenFinal(received_identifier, packages) => handle_final_generation(
+            database,
+            swarm,
+            generator,
+            received_identifier,
+            packages,
+            propagation_source,
+        )?,
     }
     Ok(())
 }
@@ -199,7 +213,11 @@ fn handle_r2_generation(
     mut generator: RefMut<QueryId, Generator>,
     identifier: Identifier,
     package: dkg::round1::Package,
+    propagation_source: PeerId,
 ) -> Result<(), SwarmError> {
+    if !generator.peer_list.contains(&propagation_source) {
+        return Err(SwarmError::InvalidPeer);
+    }
     let db_length = generator.insert_r1(identifier, package)?;
     if db_length + 1 >= generator.signer_config.max_signers as usize {
         generator.gen_r2(swarm)?;
@@ -213,7 +231,11 @@ fn handle_final_generation(
     mut generator: RefMut<QueryId, Generator>,
     received_identifier: Identifier,
     mut packages: BTreeMap<Identifier, dkg::round2::Package>,
+    propagation_source: PeerId,
 ) -> Result<(), SwarmError> {
+    if !generator.peer_list.contains(&propagation_source) {
+        return Err(SwarmError::InvalidPeer);
+    }
     let round2_package = packages
         .remove(&generator.identifier)
         .ok_or(SwarmError::DatabaseError)?;

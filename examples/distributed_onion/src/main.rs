@@ -40,7 +40,11 @@ async fn main() -> Result<()> {
                             let multiaddr: Multiaddr = args.next().unwrap().parse()?;
 
                             // add the peer to the swarm network
-                            let _ = swarm.add_peer(multiaddr.clone())?;
+                            let future = swarm.add_peer(multiaddr.clone())?;
+
+                            // We dont need to await the future, so we can drop it
+                            std::mem::drop(future);
+
                             info!("Added peer: {}", multiaddr);
                         },
                         // Begin generation of a new keypair using DKG (Distributed Key Generation) on the swarm network

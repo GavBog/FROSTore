@@ -42,14 +42,28 @@ impl ReqGenerate {
         if self.signer_config.max_signers > self.peers.len() as u16 {
             return Err(SwarmError::GenerationError);
         }
-        for count in 1..=self.signer_config.max_signers {
+        for _ in 1..=self.signer_config.max_signers {
             let peer = self
                 .peers
                 .remove(rand::thread_rng().gen_range(0..self.peers.len()));
             self.selected_peers.push(peer);
+        }
+        for peer in &self.selected_peers {
+            let count = self
+                .selected_peers
+                .iter()
+                .position(|p| p == peer)
+                .ok_or(SwarmError::InvalidPeer)? as u16
+                + 1;
+
             swarm.behaviour_mut().req_res.send_request(
-                &peer,
-                DirectMsgData::GenStart(self.query_id.clone(), self.signer_config.clone(), count),
+                peer,
+                DirectMsgData::GenStart(
+                    self.query_id.clone(),
+                    self.selected_peers.iter().map(|p| p.to_string()).collect(),
+                    self.signer_config.clone(),
+                    count,
+                ),
             );
         }
         Ok(())
@@ -213,6 +227,7 @@ pub(crate) fn handle_generate_input(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_sign_input(
     query_id: QueryId,
     response_channel: oneshot::Sender<Signature>,

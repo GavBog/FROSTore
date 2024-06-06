@@ -3,6 +3,7 @@ name = "frostore"
 description = "Schnorr Threshold Signature Database"
 repository = "https://github.com/GavBog/FROSTore"
 version = "0.2.1"
+authors = ["Gavin Bogie <me@gbogie.com> (https://www.gbogie.com/)"]
 license = "GPL-3.0"
 edition = "2021"
 

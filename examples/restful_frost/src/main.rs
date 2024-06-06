@@ -32,7 +32,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Add the boot nodes to the client
     for boot_node in BOOT_NODES.iter() {
         let multiaddr: Multiaddr = boot_node.parse()?;
-        let _ = swarm.add_peer(multiaddr)?;
+        let future = swarm.add_peer(multiaddr)?;
+
+        // We don't need to await the future, so we can drop it
+        std::mem::drop(future)
     }
 
     let app = Router::new()
