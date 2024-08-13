@@ -2,7 +2,7 @@
 name = "frostore"
 description = "Schnorr Threshold Signature Database"
 repository = "https://github.com/GavBog/FROSTore"
-version = "0.2.1"
+version = "0.2.2"
 authors = ["Gavin Bogie <me@gbogie.com> (https://www.gbogie.com/)"]
 license = "GPL-3.0"
 edition = "2021"
@@ -16,7 +16,7 @@ async-io = "2"
 async-std = { version = "1", optional = true }
 base64 = "0.22"
 bincode = "1"
-dashmap = "5"
+dashmap = "6"
 frost-ed25519 = "1"
 futures = "0.3"
 libp2p = { version = "0.53", features = [
