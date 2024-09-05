@@ -1,6 +1,6 @@
 use frostore::{
     swarm::{SwarmError, SwarmEvent, SwarmOutput},
-    Swarm,
+    StreamExt, Swarm,
 };
 use log::{error, info, trace, warn};
 
@@ -10,14 +10,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .filter_level(log::LevelFilter::Info)
         .parse_default_env()
         .init();
-
     info!("Starting FROSTore Node...");
-
     let mut swarm = Swarm::builder().build_and_exec()?;
-
     info!("FROSTore Started!");
     info!("FROSTore PeerID: {}", swarm.key.public().to_peer_id());
-
     loop {
         let message = swarm.next().await.unwrap();
         trace!("{:?}", message);

@@ -7,7 +7,7 @@ use axum::{
 use base64::{engine::general_purpose::STANDARD as b64, Engine as _};
 use frostore::{
     swarm::{SwarmError, SwarmEvent, SwarmOutput},
-    Multiaddr, Swarm, VerifyingKey,
+    Multiaddr, StreamExt, Swarm, VerifyingKey,
 };
 use log::{error, info, trace, warn};
 use serde::{Deserialize, Serialize};
@@ -26,7 +26,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .filter_level(log::LevelFilter::Info)
         .parse_default_env()
         .init();
-
     let mut swarm = Swarm::builder().build_and_exec()?;
 
     // Add the boot nodes to the client
@@ -37,13 +36,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // We don't need to await the future, so we can drop it
         std::mem::drop(future)
     }
-
     let app = Router::new()
         .route("/", get(index))
         .route("/generate", get(generate))
         .route("/sign", get(sign))
         .with_state(swarm.clone());
-
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
         .await
         .unwrap();
@@ -55,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         axum::serve(listener, app).await.unwrap();
     });
     loop {
-        let message = swarm.next().await?;
+        let message = swarm.next().await.ok_or("Failed to get message")?;
         trace!("{:?}", message);
         match message {
             SwarmOutput::SwarmEvents(SwarmEvent::NewListenAddr { address, .. }) => {

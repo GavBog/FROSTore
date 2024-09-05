@@ -16,6 +16,7 @@ pub(crate) fn peerid_from_multiaddress(multiaddr: &Multiaddr) -> Option<PeerId> 
     })
 }
 
+// TODO: Replace this eventually
 pub(crate) fn get_peers_list(swarm: &mut Libp2pSwarm<Behaviour>) -> Vec<PeerId> {
     swarm
         .behaviour_mut()

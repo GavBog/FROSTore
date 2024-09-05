@@ -1,10 +1,15 @@
 use crate::{swarm::Swarm, Keypair, Multiaddr};
-use futures::future::BoxFuture;
+use dashmap::DashMap;
+use futures::{future::BoxFuture, task::AtomicWaker};
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Mutex},
+};
 
 /// Builder for the `Swarm` struct.
 pub struct Builder {
-    pub key: Keypair,
-    pub addresses: Vec<Multiaddr>,
+    pub(crate) key: Keypair,
+    pub(crate) addresses: Vec<Multiaddr>,
     pub(crate) executor: fn(BoxFuture<'static, ()>),
 }
 
@@ -57,11 +62,13 @@ impl Builder {
 
     pub fn build(self) -> Swarm {
         Swarm {
-            input_tx: None,
-            output_rx: None,
             key: self.key,
+            input_tx: None,
             addresses: self.addresses,
             executor: self.executor,
+            queue: Arc::new(Mutex::new(VecDeque::new())),
+            tasks: Arc::new(DashMap::new()),
+            waker: Arc::new(AtomicWaker::new()),
         }
     }
 

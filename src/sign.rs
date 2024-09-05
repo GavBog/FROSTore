@@ -104,7 +104,6 @@ impl Signer {
             .gossipsub
             .publish(self.topic.clone(), send_message)
             .map_err(|_| SwarmError::MessageProcessingError)?;
-
         Ok(())
     }
 
@@ -191,7 +190,6 @@ fn handle_r1_signing(
     );
     signer.sign_r1(swarm)?;
     signer_db.insert(query_id.clone(), signer);
-
     schedule_database_cleanup(executor, signer_db.clone(), query_id);
     Ok(())
 }

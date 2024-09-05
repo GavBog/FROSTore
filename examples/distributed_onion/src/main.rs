@@ -2,7 +2,7 @@ use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD_NO_PAD as b64, Engine as Base64Engine};
 use frostore::{
     swarm::{SwarmError, SwarmEvent, SwarmOutput},
-    Multiaddr, Swarm, VerifyingKey,
+    Multiaddr, StreamExt, Swarm, VerifyingKey,
 };
 use log::{error, info, trace, warn};
 use std::collections::HashMap;
@@ -29,97 +29,102 @@ async fn main() -> Result<()> {
     let mut stdin = tokio::io::BufReader::new(tokio::io::stdin()).lines();
     loop {
         select! {
-                recv = stdin.next_line() => {
-                    match recv?.unwrap() {
-                        // Add a peer to the swarm network
-                        line if line.starts_with("ADD_PEER") => {
-                            let mut args = line.split_whitespace();
-                            let _ = args.next();
+            recv = stdin.next_line() => {
+                match recv?.unwrap() {
+                    // Add a peer to the swarm network
+                    line if line.starts_with("ADD_PEER") => {
+                        let mut args = line.split_whitespace();
+                        let _ = args.next();
 
-                            // get the multiaddr from the input
-                            let multiaddr: Multiaddr = args.next().unwrap().parse()?;
+                        // get the multiaddr from the input
+                        let multiaddr: Multiaddr = args.next().unwrap().parse()?;
 
-                            // add the peer to the swarm network
-                            let future = swarm.add_peer(multiaddr.clone())?;
+                        // add the peer to the swarm network
+                        let future = swarm.add_peer(multiaddr.clone())?;
 
-                            // We dont need to await the future, so we can drop it
-                            std::mem::drop(future);
+                        // We dont need to await the future, so we can drop it
+                        std::mem::drop(future);
+                        info!("Added peer: {}", multiaddr);
+                    },
+                    // Begin generation of a new keypair using DKG (Distributed Key Generation) on the
+                    // swarm network
+                    line if (line == "GENERATE") => {
+                        let _ = swarm.generate(MIN_THRESHOLD, TOTAL_PEERS);
+                        info!("Beginning generation");
+                    },
+                    // Begin signing a message using a keypair on the swarm network
+                    line if line.starts_with("SIGN") => {
+                        let mut args = line.split_whitespace();
+                        let _ = args.next();
 
-                            info!("Added peer: {}", multiaddr);
-                        },
-                        // Begin generation of a new keypair using DKG (Distributed Key Generation) on the swarm network
-                        line if (line == "GENERATE") => {
-                            let _ = swarm.generate(MIN_THRESHOLD, TOTAL_PEERS);
-                            info!("Beginning generation");
-                        },
-                        // Begin signing a message using a keypair on the swarm network
-                        line if line.starts_with("SIGN") => {
-                            let mut args = line.split_whitespace();
-                            let _ = args.next();
-                            // get the base64 encoded public key from the input and decode it
-                            let pubkey = args.next().unwrap().to_string();
-                            let pubkey = b64.decode(pubkey.as_bytes())?;
-                            let pubkey = VerifyingKey::deserialize(pubkey.try_into().unwrap())?;
-                            // get the message from the input
-                            let message = args.collect::<Vec<_>>().join(" ").into_bytes();
+                        // get the base64 encoded public key from the input and decode it
+                        let pubkey = args.next().unwrap().to_string();
+                        let pubkey = b64.decode(pubkey.as_bytes())?;
+                        let pubkey = VerifyingKey::deserialize(pubkey.try_into().unwrap())?;
 
-                            // begin signing the message and store the request in the hashmap
-                            let id = swarm.sign(pubkey, message.clone())?.0;
-                            request_db.insert(id, (pubkey, message));
-                            info!("Signing message!");
-                        },
-                        _ => {
-                            warn!("Unknown command");
-                        },
-                    }
+                        // get the message from the input
+                        let message = args.collect::<Vec<_>>().join(" ").into_bytes();
+
+                        // begin signing the message and store the request in the hashmap
+                        let id = swarm.sign(pubkey, message.clone())?.0;
+                        request_db.insert(id, (pubkey, message));
+                        info!("Signing message!");
+                    },
+                    _ => {
+                        warn!("Unknown command");
+                    },
                 }
-                recv = swarm.next() => {
-                    trace!("{:?}", recv);
-                    match recv.unwrap() {
-                        // Finished generating a new keypair
-                        SwarmOutput::Generation(_, pubkey) => {
-                            let hsid = HsId::from(pubkey.serialize());
-                            info!("Generated Key: {}", b64.encode(pubkey.serialize()));
-                            info!("Onion Address: {}", hsid);
+            }
+            recv = swarm.next() => {
+                trace!("{:?}", recv);
+                match recv.unwrap() {
+                    // Finished generating a new keypair
+                    SwarmOutput::Generation(_, pubkey) => {
+                        let hsid = HsId::from(pubkey.serialize());
+                        info!("Generated Key: {}", b64.encode(pubkey.serialize()));
+                        info!("Onion Address: {}", hsid);
+                    },
+                    // Finished signing a message
+                    SwarmOutput::Signing(id, signature) => {
+                        let (pubkey, message) = request_db.get(&id).unwrap();
+                        info!("Message: {}", String::from_utf8_lossy(message));
+                        info!("Signature: {:?}", signature);
+                        let valid = pubkey.verify(message, &signature).is_ok();
+                        info!("Signature Valid: {}", valid);
+                    },
+                    // Swarm network events
+                    SwarmOutput::SwarmEvents(event) => {
+                        match event {
+                            SwarmEvent::NewListenAddr { address, .. } => {
+                                info!("Listening on {}", address);
+                                info!("ADD_PEER {}", address.with_p2p(swarm.key.public().to_peer_id()).unwrap());
+                            },
+                            SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+                                info!("Connected to {}", peer_id);
+                            },
+                            SwarmEvent::ConnectionClosed { peer_id, .. } => {
+                                info!("Disconnected from {}", peer_id);
+                            },
+                            _ => { },
+                        }
+                    },
+                    // Print out any errors
+                    SwarmOutput::Error(e) => match e {
+                        SwarmError::ConfigurationError | SwarmError::InvalidSignature => {
+                            error!("{:?}", e);
                         },
-                        // Finished signing a message
-                        SwarmOutput::Signing(id, signature) => {
-                            let (pubkey, message) = request_db.get(&id).unwrap();
-                            info!("Message: {}", String::from_utf8_lossy(message));
-                            info!("Signature: {:?}", signature);
-                            let valid = pubkey.verify(message, &signature).is_ok();
-                            info!("Signature Valid: {}", valid);
-                        },
-                        // Swarm network events
-                        SwarmOutput::SwarmEvents(event) => {
-                            match event {
-                                SwarmEvent::NewListenAddr { address, .. } => {
-                                    info!("Listening on {}", address);
-                                    info!(
-                                        "ADD_PEER {}",
-                                        address.with_p2p(swarm.key.public().to_peer_id()).unwrap()
-                                    );
-                                },
-                                SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-                                    info!("Connected to {}", peer_id);
-                                },
-                                SwarmEvent::ConnectionClosed { peer_id, .. } => {
-                                    info!("Disconnected from {}", peer_id);
-                                },
-                                _ => { },
-                            }
-                        },
-                        // Print out any errors
-                        SwarmOutput::Error(e) => match e {
-                            SwarmError::ConfigurationError | SwarmError::InvalidSignature => {
-                                error!("{:?}", e);
-                            }
                         _ => {
                             warn!("{:?}", e);
-                        }
+                        },
+                    },
+                    // Shutdown the node
+                    SwarmOutput::Shutdown => {
+                        info!("The Node has successfully shutdown");
+                        break;
                     },
                 }
             },
         }
     }
+    Ok(())
 }

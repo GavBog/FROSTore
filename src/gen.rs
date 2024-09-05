@@ -166,7 +166,6 @@ pub(crate) fn gen_start(
         .gossipsub
         .subscribe(&IdentTopic::new(&query_id))
         .map_err(|_| SwarmError::MessageProcessingError)?;
-
     schedule_database_cleanup(executor, generator_db.clone(), query_id);
     Ok(())
 }

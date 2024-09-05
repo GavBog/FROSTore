@@ -1,5 +1,5 @@
 use crate::{
-    swarm::SwarmError,
+    swarm::{SwarmError, SwarmResponse, Task},
     utils::{get_peers_list, peerid_from_multiaddress, schedule_database_cleanup},
     Behaviour, DbData, DirectMsgData, GenerationMessage, MessageData, Multiaddr, QueryId,
     SignerConfig, SigningMessage,
@@ -7,7 +7,7 @@ use crate::{
 use base64::{engine::general_purpose::STANDARD_NO_PAD as b64, Engine as Base64Engine};
 use dashmap::DashMap;
 use frost_ed25519::{round1, Identifier, Signature, SigningPackage, VerifyingKey};
-use futures::{channel::oneshot, future::BoxFuture};
+use futures::future::BoxFuture;
 use libp2p::{gossipsub::TopicHash, PeerId, Swarm as Libp2pSwarm};
 use rand::Rng;
 use std::{collections::BTreeMap, sync::Arc};
@@ -16,8 +16,8 @@ pub(crate) struct ReqGenerate {
     peers: Vec<PeerId>,
     selected_peers: Vec<PeerId>,
     peer_response_count: usize,
+    task: Task,
     pub(crate) query_id: QueryId,
-    response_channel: oneshot::Sender<VerifyingKey>,
     pub(crate) signer_config: SignerConfig,
 }
 
@@ -25,15 +25,15 @@ impl ReqGenerate {
     pub(crate) fn new(
         peers: Vec<PeerId>,
         query_id: QueryId,
-        response_channel: oneshot::Sender<VerifyingKey>,
         signer_config: SignerConfig,
+        task: Task,
     ) -> Self {
         Self {
             peers,
             selected_peers: Vec::new(),
             peer_response_count: 0,
+            task,
             query_id,
-            response_channel,
             signer_config,
         }
     }
@@ -55,7 +55,6 @@ impl ReqGenerate {
                 .position(|p| p == peer)
                 .ok_or(SwarmError::InvalidPeer)? as u16
                 + 1;
-
             swarm.behaviour_mut().req_res.send_request(
                 peer,
                 DirectMsgData::GenStart(
@@ -85,14 +84,12 @@ impl ReqGenerate {
             .gossipsub
             .publish(TopicHash::from_raw(self.query_id.clone()), send_message)
             .map_err(|_| SwarmError::MessageProcessingError)?;
-
         Ok(())
     }
 
     pub(crate) fn send_response(self, response: VerifyingKey) -> Result<(), SwarmError> {
-        self.response_channel
-            .send(response)
-            .map_err(|_| SwarmError::MessageProcessingError)?;
+        self.task.set_value(SwarmResponse::Generate(response))?;
+        self.task.complete();
         Ok(())
     }
 }
@@ -103,8 +100,8 @@ pub(crate) struct ReqSign {
     pub(crate) message: Vec<u8>,
     pub(crate) pubkey: Vec<u8>,
     query_id: QueryId,
-    response_channel: oneshot::Sender<Signature>,
     pub(crate) signer_config: SignerConfig,
+    task: Task,
 }
 
 impl ReqSign {
@@ -112,8 +109,8 @@ impl ReqSign {
         message: Vec<u8>,
         query_id: QueryId,
         pubkey: Vec<u8>,
-        response_channel: oneshot::Sender<Signature>,
         signer_config: SignerConfig,
+        task: Task,
     ) -> Self {
         Self {
             commitments_db: BTreeMap::new(),
@@ -121,8 +118,8 @@ impl ReqSign {
             message,
             pubkey,
             query_id,
-            response_channel,
             signer_config,
+            task,
         }
     }
 
@@ -177,18 +174,14 @@ impl ReqSign {
     }
 
     pub(crate) fn send_response(self, response: Signature) -> Result<(), SwarmError> {
-        self.response_channel
-            .send(response)
-            .map_err(|_| SwarmError::MessageProcessingError)?;
+        self.task.set_value(SwarmResponse::Sign(response))?;
+        self.task.complete();
         Ok(())
     }
 }
 
 pub(crate) fn handle_add_peer_input(
     multiaddress: Multiaddr,
-    add_peer_db: &Arc<DashMap<PeerId, oneshot::Sender<()>>>,
-    response_channel: oneshot::Sender<()>,
-    executor: fn(BoxFuture<'static, ()>),
     swarm: &mut Libp2pSwarm<Behaviour>,
 ) -> Result<(), SwarmError> {
     let peer = peerid_from_multiaddress(&multiaddress).ok_or(SwarmError::MessageProcessingError)?;
@@ -198,31 +191,26 @@ pub(crate) fn handle_add_peer_input(
         .kad
         .bootstrap()
         .map_err(|_| SwarmError::InvalidPeer)?;
-
-    add_peer_db.insert(peer, response_channel);
-
-    schedule_database_cleanup(executor, add_peer_db.clone(), peer);
     Ok(())
 }
 
 pub(crate) fn handle_generate_input(
     query_id: QueryId,
     signer_config: SignerConfig,
-    response_channel: oneshot::Sender<VerifyingKey>,
     executor: fn(BoxFuture<'static, ()>),
     swarm: &mut Libp2pSwarm<Behaviour>,
     generation_requester_db: &Arc<DashMap<QueryId, ReqGenerate>>,
+    tasks: &Arc<DashMap<QueryId, Task>>,
 ) -> Result<(), SwarmError> {
     let peer_list = get_peers_list(swarm);
-    let mut generate_request = ReqGenerate::new(
-        peer_list,
-        query_id.clone(),
-        response_channel,
-        signer_config.clone(),
-    );
+    let task = tasks
+        .get(&query_id)
+        .ok_or(SwarmError::DatabaseError)?
+        .clone();
+    let mut generate_request =
+        ReqGenerate::new(peer_list, query_id.clone(), signer_config.clone(), task);
     generate_request.gen_r1(swarm)?;
     generation_requester_db.insert(query_id.clone(), generate_request);
-
     schedule_database_cleanup(executor, generation_requester_db.clone(), query_id);
     Ok(())
 }
@@ -230,28 +218,25 @@ pub(crate) fn handle_generate_input(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_sign_input(
     query_id: QueryId,
-    response_channel: oneshot::Sender<Signature>,
     public_key: Vec<u8>,
     message: Vec<u8>,
     executor: fn(BoxFuture<'static, ()>),
     swarm: &mut Libp2pSwarm<Behaviour>,
     signer_requester_db: &Arc<DashMap<QueryId, ReqSign>>,
     database: &DashMap<Vec<u8>, DbData>,
+    tasks: &Arc<DashMap<QueryId, Task>>,
 ) -> Result<(), SwarmError> {
     let signer_config = database
         .get(&public_key)
         .and_then(|data| data.signer_config.clone())
         .ok_or(SwarmError::DatabaseError)?;
-    let sign_requester = ReqSign::new(
-        message,
-        query_id.clone(),
-        public_key,
-        response_channel,
-        signer_config,
-    );
+    let task = tasks
+        .get(&query_id)
+        .ok_or(SwarmError::DatabaseError)?
+        .clone();
+    let sign_requester = ReqSign::new(message, query_id.clone(), public_key, signer_config, task);
     sign_requester.sign_r1(swarm)?;
     signer_requester_db.insert(query_id.clone(), sign_requester);
-
     schedule_database_cleanup(executor, signer_requester_db.clone(), query_id);
     Ok(())
 }

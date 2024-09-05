@@ -41,3 +41,7 @@ tokio = { version = "1", features = ["full"], optional = true }
 default = []
 async-std = ["dep:async-std"]
 tokio = ["dep:tokio", "libp2p/tokio"]
+
+[dev-dependencies]
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }

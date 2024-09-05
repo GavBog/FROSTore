@@ -3,10 +3,7 @@ use crate::{
     client::{ReqGenerate, ReqSign},
     gen::{gen_start, send_final_gen, GenerationMessage, Generator},
     sign::{send_signature, signing_package, Signer, SigningMessage},
-    swarm::{
-        create_libp2p_swarm, Behaviour, BehaviourEvent, Swarm as FrostSwarm, SwarmError,
-        SwarmInput, SwarmOutput,
-    },
+    swarm::{Behaviour, BehaviourEvent, SwarmError, SwarmInput, SwarmOutput, Task},
 };
 use dashmap::DashMap;
 use frost_ed25519::{
@@ -15,30 +12,38 @@ use frost_ed25519::{
     Identifier,
 };
 pub use frost_ed25519::{Signature, VerifyingKey};
-use futures::{channel::oneshot, select, FutureExt, StreamExt};
+pub use futures::StreamExt;
+use futures::{select, FutureExt};
 use libp2p::{
     gossipsub::{self, Event as GossipsubEvent},
     identify,
+    kad::Event as KademliaEvent,
     request_response::{self, Message as ReqResMessage},
     swarm::SwarmEvent,
-    PeerId, Swarm as Libp2pSwarm,
+    Swarm as Libp2pSwarm,
 };
 pub use libp2p::{
     identity::Keypair, multiaddr::Protocol as MultiaddrProtocol, swarm::Executor, Multiaddr,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{future::Future, pin::Pin, sync::Arc};
+use swarm::SwarmResponse;
 
 /// Builder for the Swarm
 pub mod builder;
+
 /// Client input methods and data structures for interacting with the Swarm
 pub mod client;
+
 /// Swarm Key Generation methods and data structures
 pub mod gen;
+
 /// Swarm Message Signing methods and data structures
 pub mod sign;
+
 /// Swarm data structures
 pub mod swarm;
+
 /// Miscellaneous utilities
 pub mod utils;
 
@@ -54,8 +59,8 @@ pub struct SignerConfig {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-/// Data sent between peers on the network
-/// All data is sent as a DirectMessage is a request-response pattern
+/// Data sent between peers on the network All data is sent as a DirectMessage is a
+/// request-response pattern
 pub enum DirectMsgData {
     /// Start the generation process
     GenStart(QueryId, Vec<String>, SignerConfig, u16),
@@ -83,7 +88,6 @@ pub struct DbData {
 }
 
 struct SwarmState {
-    add_peer_db: Arc<DashMap<PeerId, oneshot::Sender<()>>>,
     generation_requester_db: Arc<DashMap<QueryId, ReqGenerate>>,
     generator_db: Arc<DashMap<QueryId, Generator>>,
     signer_db: Arc<DashMap<QueryId, Signer>>,
@@ -94,7 +98,6 @@ struct SwarmState {
 impl Default for SwarmState {
     fn default() -> Self {
         Self {
-            add_peer_db: Arc::new(DashMap::new()),
             generation_requester_db: Arc::new(DashMap::new()),
             generator_db: Arc::new(DashMap::new()),
             signer_db: Arc::new(DashMap::new()),
@@ -107,10 +110,11 @@ impl Default for SwarmState {
 async fn start_swarm(
     input: async_channel::Receiver<SwarmInput>,
     output: async_channel::Sender<SwarmOutput>,
-    frost_swarm: FrostSwarm,
+    mut libp2p_swarm: Libp2pSwarm<Behaviour>,
+    tasks: &Arc<DashMap<QueryId, Task>>,
+    executor: fn(Pin<Box<dyn Future<Output = ()> + Send>>),
 ) -> Result<(), SwarmError> {
     let SwarmState {
-        add_peer_db,
         generation_requester_db,
         generator_db,
         signer_db,
@@ -118,45 +122,35 @@ async fn start_swarm(
         database,
     } = SwarmState::default();
 
-    let mut libp2p_swarm = create_libp2p_swarm(&frost_swarm)?;
-    let executor = frost_swarm.executor;
-
     // HANDLE INPUT FROM CLIENT
-    let handle_client_input = |input: SwarmInput,
-                               swarm: &mut Libp2pSwarm<Behaviour>|
-     -> Result<(), SwarmError> {
-        match input {
-            SwarmInput::AddPeer(peer_address, resp_channel) => client::handle_add_peer_input(
-                peer_address,
-                &add_peer_db,
-                resp_channel,
-                executor,
-                swarm,
-            )?,
-            SwarmInput::Generate(req_id, signer_conf, resp_channel) => {
-                client::handle_generate_input(
+    let handle_client_input =
+        |input: SwarmInput, swarm: &mut Libp2pSwarm<Behaviour>| -> Result<(), SwarmError> {
+            match input {
+                SwarmInput::AddPeer(peer_address) => {
+                    client::handle_add_peer_input(peer_address, swarm)?
+                }
+                SwarmInput::Generate(req_id, signer_conf) => client::handle_generate_input(
                     req_id,
                     signer_conf,
-                    resp_channel,
                     executor,
                     swarm,
                     &generation_requester_db,
-                )?
+                    tasks,
+                )?,
+                SwarmInput::Sign(req_id, public_key, msg) => client::handle_sign_input(
+                    req_id,
+                    public_key,
+                    msg,
+                    executor,
+                    swarm,
+                    &signer_requester_db,
+                    &database,
+                    tasks,
+                )?,
+                SwarmInput::Shutdown => {}
             }
-            SwarmInput::Sign(req_id, resp_channel, public_key, msg) => client::handle_sign_input(
-                req_id,
-                resp_channel,
-                public_key,
-                msg,
-                executor,
-                swarm,
-                &signer_requester_db,
-                &database,
-            )?,
-            SwarmInput::Shutdown => {}
-        }
-        Ok(())
-    };
+            Ok(())
+        };
 
     // HANDLE EVENTS FROM SWARM
     let handle_gossipsub_message = |message: gossipsub::Message,
@@ -189,6 +183,7 @@ async fn start_swarm(
         }
         Ok(())
     };
+
     let handle_gossipsub_event =
         |event: GossipsubEvent, swarm: &mut Libp2pSwarm<Behaviour>| -> Result<(), SwarmError> {
             match event {
@@ -211,6 +206,7 @@ async fn start_swarm(
             }
             Ok(())
         };
+
     let handle_request_event =
         |message: DirectMsgData, swarm: &mut Libp2pSwarm<Behaviour>| -> Result<(), SwarmError> {
             match message {
@@ -249,6 +245,7 @@ async fn start_swarm(
             }
             Ok(())
         };
+
     let handle_behavior_event =
         |event: BehaviourEvent, swarm: &mut Libp2pSwarm<Behaviour>| -> Result<(), SwarmError> {
             match event {
@@ -263,7 +260,14 @@ async fn start_swarm(
                             .add_address(&peer_id, info.listen_addrs[0].clone());
                     }
                 }
-                BehaviourEvent::Kademlia(_) => {}
+                BehaviourEvent::Kademlia(event) => {
+                    if let KademliaEvent::RoutingUpdated { peer, .. } = event {
+                        if let Some(task) = tasks.get(&peer.to_string()) {
+                            task.set_value(SwarmResponse::AddPeer)?;
+                            task.complete();
+                        }
+                    }
+                }
                 BehaviourEvent::RequestResponse(event) => {
                     if let request_response::Event::Message {
                         message: ReqResMessage::Request { request, .. },
@@ -276,6 +280,7 @@ async fn start_swarm(
             }
             Ok(())
         };
+
     let handle_event = |event: SwarmEvent<BehaviourEvent>,
                         swarm: &mut Libp2pSwarm<Behaviour>|
      -> Result<(), SwarmError> {
@@ -284,14 +289,6 @@ async fn start_swarm(
                 handle_behavior_event(event, swarm)?;
             }
             _ => {
-                if let swarm::SwarmEvent::ConnectionEstablished { peer_id, .. } = event {
-                    if let Some(sender) = add_peer_db.remove(&peer_id) {
-                        sender
-                            .1
-                            .send(())
-                            .map_err(|_| SwarmError::MessageProcessingError)?;
-                    }
-                }
                 output
                     .try_send(SwarmOutput::SwarmEvents(event))
                     .map_err(|_| SwarmError::MessageProcessingError)?;
@@ -300,12 +297,12 @@ async fn start_swarm(
         Ok(())
     };
 
-    // BEGIN MAIN LOOP
     loop {
         select! {
             recv = input.recv().fuse() => {
                 if let Ok(recv) = recv {
                     if let SwarmInput::Shutdown = recv {
+                        let _ = output.try_send(SwarmOutput::Shutdown);
                         return Ok(());
                     }
                     handle_client_input(recv, &mut libp2p_swarm).unwrap_or_else(|e| {

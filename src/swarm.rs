@@ -1,9 +1,12 @@
 use crate::{
-    builder::Builder, start_swarm, utils::PROTOCOL_VERSION, DirectMsgData, Executor, Keypair,
-    QueryId, SignerConfig,
+    builder::Builder,
+    start_swarm,
+    utils::{peerid_from_multiaddress, PROTOCOL_VERSION},
+    DirectMsgData, Executor, Keypair, QueryId, SignerConfig,
 };
+use dashmap::DashMap;
 use frost_ed25519::{Signature, VerifyingKey};
-use futures::{channel::oneshot, future::BoxFuture};
+use futures::{future::BoxFuture, task::AtomicWaker, Stream};
 pub use libp2p::swarm::SwarmEvent;
 use libp2p::{
     gossipsub, identify,
@@ -18,12 +21,22 @@ use libp2p::{
 };
 use libp2p::{swarm::NetworkBehaviour, SwarmBuilder};
 use rand::{distributions::Alphanumeric, Rng};
-use std::time::Duration;
+use std::{
+    collections::VecDeque,
+    future::Future,
+    pin::Pin,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    task::{Context, Poll},
+    time::Duration,
+};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
-/// Errors that can occur in the Swarm
-/// Errors are returned from the Swarm in SwarmOutput(Error)
+/// Errors that can occur in the Swarm Errors are returned from the Swarm in
+/// SwarmOutput(Error)
 pub enum SwarmError {
     // Task related errors
     #[error("Generation Error")]
@@ -32,7 +45,6 @@ pub enum SwarmError {
     SigningError,
     #[error("Produced a signature that is invalid")]
     InvalidSignature,
-
     // Data handling errors
     #[error("Configuration error")]
     ConfigurationError,
@@ -42,7 +54,6 @@ pub enum SwarmError {
     MessageProcessingError,
     #[error("Database error")]
     DatabaseError,
-
     // Network related errors
     #[error("Invalid peer responded")]
     InvalidPeer,
@@ -52,18 +63,17 @@ pub enum SwarmError {
 /// The input to the Swarm
 pub enum SwarmInput {
     /// Add a peer to the network
-    AddPeer(Multiaddr, oneshot::Sender<()>),
+    AddPeer(Multiaddr),
     /// Generate a new public key with Distributed Key Generation
-    Generate(QueryId, SignerConfig, oneshot::Sender<VerifyingKey>),
+    Generate(QueryId, SignerConfig),
     /// Sign a message with the given public key
-    Sign(QueryId, oneshot::Sender<Signature>, Vec<u8>, Vec<u8>),
+    Sign(QueryId, Vec<u8>, Vec<u8>),
     /// Shutdown the Swarm
     Shutdown,
 }
 
 #[derive(Debug)]
-/// The output of the Swarm
-/// Swarm Output is returned from Swarm.next()
+/// The output of the Swarm Swarm Output is returned from Swarm.next()
 pub enum SwarmOutput {
     /// Error produced by the Swarm
     Error(SwarmError),
@@ -73,6 +83,15 @@ pub enum SwarmOutput {
     Signing(QueryId, Signature),
     /// Miscellaneous events from the Swarm
     SwarmEvents(SwarmEvent<BehaviourEvent>),
+    /// Successful Shutdown
+    Shutdown,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum SwarmResponse {
+    AddPeer,
+    Generate(VerifyingKey),
+    Sign(Signature),
 }
 
 #[derive(NetworkBehaviour)]
@@ -120,11 +139,13 @@ impl From<request_response::Event<DirectMsgData, Vec<u8>>> for BehaviourEvent {
 #[derive(Debug, Clone)]
 /// The running instance of the FROSTore Swarm
 pub struct Swarm {
-    pub input_tx: Option<async_channel::Sender<SwarmInput>>,
-    pub output_rx: Option<async_channel::Receiver<SwarmOutput>>,
     pub key: Keypair,
-    pub addresses: Vec<Multiaddr>,
-    pub executor: fn(BoxFuture<'static, ()>),
+    pub(crate) input_tx: Option<async_channel::Sender<SwarmInput>>,
+    pub(crate) addresses: Vec<Multiaddr>,
+    pub(crate) executor: fn(BoxFuture<'static, ()>),
+    pub(crate) queue: Arc<Mutex<VecDeque<SwarmOutput>>>,
+    pub(crate) tasks: Arc<DashMap<QueryId, Task>>,
+    pub(crate) waker: Arc<AtomicWaker>,
 }
 
 impl Swarm {
@@ -135,61 +156,76 @@ impl Swarm {
 
     /// Execute the Swarm
     pub fn exec(&mut self) -> Result<(), SwarmError> {
-        if self.input_tx.is_some() || self.output_rx.is_some() {
+        if self.input_tx.is_some() {
             return Err(SwarmError::ExecutionError);
         }
-
         let (input_tx, input_rx) = async_channel::unbounded::<SwarmInput>();
         let (output_tx, output_rx) = async_channel::unbounded::<SwarmOutput>();
-
         self.input_tx = Some(input_tx);
-        self.output_rx = Some(output_rx);
-        let frost_swarm = self.clone();
+        let libp2p_swarm = create_libp2p_swarm(self)?;
+        let executor = self.executor;
+        let queue = self.queue.clone();
+        let tasks = self.tasks.clone();
+        let waker = self.waker.clone();
         self.executor.exec(Box::pin(async move {
-            start_swarm(input_rx, output_tx, frost_swarm)
+            loop {
+                match output_rx.recv().await.expect("Output reader failed!") {
+                    SwarmOutput::Shutdown => return,
+                    output => {
+                        process_output(&queue, &tasks, &waker, output)
+                            .expect("Error processing output!");
+                    }
+                }
+            }
+        }));
+        let tasks = self.tasks.clone();
+        self.executor.exec(Box::pin(async move {
+            start_swarm(input_rx, output_tx, libp2p_swarm, &tasks, executor)
                 .await
                 .expect("FROSTore Swarm ran into an error!");
         }));
         Ok(())
     }
 
-    /// Get the next event from the network
-    pub async fn next(&mut self) -> Result<SwarmOutput, SwarmError> {
-        self.output_rx
-            .as_mut()
-            .ok_or(SwarmError::ConfigurationError)?
-            .recv()
-            .await
-            .map_err(|_| SwarmError::MessageProcessingError)
-    }
-
     /// Add a peer to the network
     pub fn add_peer(
         &mut self,
         multiaddr: Multiaddr,
-    ) -> Result<BoxFuture<'_, Result<(), SwarmError>>, SwarmError> {
-        let (tx, rx) = oneshot::channel::<()>();
-        let send_message = SwarmInput::AddPeer(multiaddr, tx);
+    ) -> Result<impl Future<Output = Result<(), SwarmError>>, SwarmError> {
+        let send_message = SwarmInput::AddPeer(multiaddr.clone());
         self.input_tx
             .as_mut()
             .ok_or(SwarmError::ConfigurationError)?
             .try_send(send_message)
             .map_err(|_| SwarmError::MessageProcessingError)?;
-
-        Ok(Box::pin(async move {
-            rx.await.map_err(|_| SwarmError::MessageProcessingError)
-        }))
+        let peer_id =
+            peerid_from_multiaddress(&multiaddr).ok_or(SwarmError::MessageProcessingError)?;
+        let task = self.add_task(peer_id.to_string())?;
+        Ok(async move {
+            let result = task.await;
+            match result {
+                Ok(response) => match response {
+                    SwarmResponse::AddPeer => Ok(()),
+                    _ => Err(SwarmError::InvalidPeer),
+                },
+                Err(_) => Err(SwarmError::InvalidPeer),
+            }
+        })
     }
 
-    /// Generate a new public key with Distributed Key Generation
-    /// The public key is returned as a result
-    /// The private key is stored by the network
+    /// Generate a new public key with Distributed Key Generation The public key is
+    /// returned as a result The private key is stored by the network
     pub fn generate(
         &mut self,
         min_threshold: u16,
         total_peers: u16,
-    ) -> Result<(QueryId, BoxFuture<'_, Result<VerifyingKey, SwarmError>>), SwarmError> {
-        let (tx, rx) = oneshot::channel::<VerifyingKey>();
+    ) -> Result<
+        (
+            QueryId,
+            impl Future<Output = Result<VerifyingKey, SwarmError>>,
+        ),
+        SwarmError,
+    > {
         let query_id = rand::thread_rng()
             .sample_iter(&Alphanumeric)
             .take(32)
@@ -201,21 +237,23 @@ impl Swarm {
                 max_signers: total_peers,
                 min_signers: min_threshold,
             },
-            tx,
         );
         self.input_tx
             .as_mut()
             .ok_or(SwarmError::ConfigurationError)?
             .try_send(send_message)
             .map_err(|_| SwarmError::MessageProcessingError)?;
-
-        Ok((
-            query_id,
-            Box::pin(async move {
-                let response = rx.await.map_err(|_| SwarmError::MessageProcessingError)?;
-                Ok(response)
-            }),
-        ))
+        let task = self.add_task(query_id.clone())?;
+        Ok((query_id, async move {
+            let result = task.await;
+            match result {
+                Ok(response) => match response {
+                    SwarmResponse::Generate(pubkey) => Ok(pubkey),
+                    _ => Err(SwarmError::GenerationError),
+                },
+                Err(_) => Err(SwarmError::GenerationError),
+            }
+        }))
     }
 
     /// Sign a message with the given public key
@@ -223,28 +261,29 @@ impl Swarm {
         &mut self,
         pubkey: VerifyingKey,
         message: Vec<u8>,
-    ) -> Result<(QueryId, BoxFuture<'_, Result<Signature, SwarmError>>), SwarmError> {
-        let (tx, rx) = oneshot::channel::<Signature>();
+    ) -> Result<(QueryId, impl Future<Output = Result<Signature, SwarmError>>), SwarmError> {
         let query_id = rand::thread_rng()
             .sample_iter(&Alphanumeric)
             .take(32)
             .map(char::from)
             .collect::<String>();
-        let send_message =
-            SwarmInput::Sign(query_id.clone(), tx, pubkey.serialize().to_vec(), message);
+        let send_message = SwarmInput::Sign(query_id.clone(), pubkey.serialize().to_vec(), message);
         self.input_tx
             .as_mut()
             .ok_or(SwarmError::ConfigurationError)?
             .try_send(send_message)
             .map_err(|_| SwarmError::MessageProcessingError)?;
-
-        Ok((
-            query_id,
-            Box::pin(async move {
-                let response = rx.await.map_err(|_| SwarmError::MessageProcessingError)?;
-                Ok(response)
-            }),
-        ))
+        let task = self.add_task(query_id.clone())?;
+        Ok((query_id, async move {
+            let result = task.await;
+            match result {
+                Ok(response) => match response {
+                    SwarmResponse::Sign(signature) => Ok(signature),
+                    _ => Err(SwarmError::SigningError),
+                },
+                Err(_) => Err(SwarmError::SigningError),
+            }
+        }))
     }
 
     /// Shutdown the Swarm
@@ -255,25 +294,149 @@ impl Swarm {
             .ok_or(SwarmError::ConfigurationError)?
             .try_send(send_message)
             .map_err(|_| SwarmError::MessageProcessingError)?;
-
         self.input_tx = None;
-        self.output_rx = None;
-
         Ok(())
     }
+
+    fn add_task(&mut self, id: QueryId) -> Result<Task, SwarmError> {
+        let task = Task::new();
+        self.tasks.insert(id, task.clone());
+        Ok(task)
+    }
+}
+
+impl Stream for Swarm {
+    type Item = SwarmOutput;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+        self.waker.register(cx.waker());
+        if let Ok(mut queue) = self.queue.try_lock() {
+            if let Some(output) = queue.pop_front() {
+                Poll::Ready(Some(output))
+            } else {
+                Poll::Pending
+            }
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct TaskInner {
+    response: Mutex<Option<SwarmResponse>>,
+    complete: AtomicBool,
+    waker: AtomicWaker,
+}
+
+impl TaskInner {
+    fn new() -> Self {
+        TaskInner {
+            response: Mutex::new(None),
+            complete: AtomicBool::new(false),
+            waker: AtomicWaker::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct Task {
+    inner: Arc<TaskInner>,
+}
+
+impl Task {
+    pub fn new() -> Self {
+        let task = Arc::new(TaskInner::new());
+        Task { inner: task }
+    }
+
+    pub fn complete(&self) {
+        self.inner.complete.store(true, Ordering::Release);
+        self.inner.waker.wake();
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.inner.complete.load(Ordering::Acquire)
+    }
+
+    pub fn set_value(&self, response: SwarmResponse) -> Result<(), SwarmError> {
+        let mut value = self
+            .inner
+            .response
+            .lock()
+            .map_err(|_| SwarmError::DatabaseError)?;
+        *value = Some(response);
+        Ok(())
+    }
+
+    pub fn get_value(&self) -> Result<SwarmResponse, SwarmError> {
+        let value = self
+            .inner
+            .response
+            .lock()
+            .map_err(|_| SwarmError::DatabaseError)?;
+        let value = value.as_ref().ok_or(SwarmError::DatabaseError)?;
+        Ok(value.clone())
+    }
+}
+
+impl Future for Task {
+    type Output = Result<SwarmResponse, SwarmError>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        let task = self;
+        task.inner.waker.register(cx.waker());
+        if task.is_complete() {
+            Poll::Ready(task.get_value())
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+fn process_output(
+    queue: &Arc<Mutex<VecDeque<SwarmOutput>>>,
+    tasks: &Arc<DashMap<QueryId, Task>>,
+    waker: &Arc<AtomicWaker>,
+    output: SwarmOutput,
+) -> Result<(), SwarmError> {
+    match &output {
+        SwarmOutput::Generation(id, key) => {
+            if let Some(task) = tasks.get_mut(id) {
+                let response = SwarmResponse::Generate(*key);
+                task.set_value(response)?;
+            }
+        }
+        SwarmOutput::Signing(id, signature) => {
+            if let Some(task) = tasks.get_mut(id) {
+                let response = SwarmResponse::Sign(*signature);
+                task.set_value(response)?;
+            }
+        }
+        SwarmOutput::SwarmEvents(SwarmEvent::ConnectionEstablished { peer_id, .. }) => {
+            let id = peer_id.to_string();
+            if let Some(task) = tasks.get_mut(&id) {
+                let response = SwarmResponse::AddPeer;
+                task.set_value(response)?;
+            }
+        }
+        _ => {}
+    };
+    if let Ok(mut queue) = queue.lock() {
+        queue.push_back(output);
+        waker.wake();
+    }
+    Ok(())
 }
 
 pub(crate) fn create_libp2p_swarm(config: &Swarm) -> Result<Libp2pSwarm<Behaviour>, SwarmError> {
     let swarm = SwarmBuilder::with_existing_identity(config.key.clone());
-
     #[cfg(feature = "tokio")]
     let swarm = swarm.with_tokio();
     #[cfg(not(feature = "tokio"))]
     let swarm = swarm.with_async_std();
-
     let swarm_config = Libp2pConfig::with_executor(config.executor)
         .with_idle_connection_timeout(Duration::from_secs(60));
-
     let mut swarm = swarm
         .with_tcp(
             tcp::Config::default().nodelay(true),
@@ -308,7 +471,6 @@ pub(crate) fn create_libp2p_swarm(config: &Swarm) -> Result<Libp2pSwarm<Behaviou
         .map_err(|_| SwarmError::ConfigurationError)?
         .with_swarm_config(|_| swarm_config)
         .build();
-
     swarm.behaviour_mut().kad.set_mode(Some(Mode::Server));
     for address in config.addresses.iter() {
         swarm
