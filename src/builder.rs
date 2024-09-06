@@ -27,9 +27,9 @@ impl Default for Builder {
                 #[cfg(all(feature = "async-std", not(feature = "tokio")))]
                 async_std::task::spawn(_fut);
                 #[cfg(not(any(feature = "tokio", feature = "async-std")))]
-                panic!(
-                    "No executor found. Please enable one of the following features: tokio, async-std; or provide your own executor."
-                );
+                futures::executor::ThreadPool::new()
+                    .expect("Failed to create thread pool")
+                    .spawn_ok(_fut);
             },
         }
     }
