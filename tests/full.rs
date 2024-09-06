@@ -50,8 +50,14 @@ async fn gen_and_sign() -> Result<()> {
 
     let message = b"hello".to_vec();
     println!("Signing message: {:?}", message);
-    let signature = swarm_list[0].sign(pubkey, message)?.1.await?;
+    let signature = swarm_list[0].sign(pubkey, message.clone())?.1.await?;
     println!("Signature: {:?}", signature);
 
+    let valid = pubkey.verify(&message, &signature).is_ok();
+    println!("Signature Valid: {}", valid);
+
+    if !valid {
+        return Err(anyhow!("Invalid signature"));
+    }
     Ok(())
 }
