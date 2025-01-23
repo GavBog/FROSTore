@@ -1,9 +1,9 @@
-pub use crate::swarm::{DirectMsgData, Swarm};
+pub use crate::swarm::Swarm;
 use crate::{
     client::{ReqGenerate, ReqSign},
     gen::{gen_start, send_final_gen, GenerationMessage, Generator},
     sign::{send_signature, signing_package, Signer, SigningMessage},
-    swarm::{Behaviour, BehaviourEvent, SwarmError, SwarmInput, SwarmOutput, Task},
+    swarm::{Behaviour, BehaviourEvent, DirectMsgData, SwarmError, SwarmInput, SwarmOutput, Task},
 };
 use dashmap::DashMap;
 use frost_ed25519::{
