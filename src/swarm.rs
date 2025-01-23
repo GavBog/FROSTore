@@ -2,10 +2,12 @@ use crate::{
     builder::Builder,
     start_swarm,
     utils::{peerid_from_multiaddress, PROTOCOL_VERSION},
-    DirectMsgData, Executor, Keypair, QueryId, SignerConfig,
+    Executor, Keypair, QueryId, SignerConfig,
 };
 use dashmap::DashMap;
-use frost_ed25519::{Signature, VerifyingKey};
+use frost_ed25519::{
+    keys::PublicKeyPackage, round1::SigningCommitments, Identifier, Signature, VerifyingKey,
+};
 use futures::{future::BoxFuture, task::AtomicWaker, Stream};
 pub use libp2p::swarm::SwarmEvent;
 use libp2p::{
@@ -21,6 +23,7 @@ use libp2p::{
 };
 use libp2p::{swarm::NetworkBehaviour, SwarmBuilder};
 use rand::{distributions::Alphanumeric, Rng};
+use serde::{Deserialize, Serialize};
 use std::{
     collections::VecDeque,
     future::Future,
@@ -94,6 +97,20 @@ pub(crate) enum SwarmResponse {
     Sign(Signature),
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+/// Data sent between peers on the network All data is sent as a DirectMessage is a
+/// request-response pattern
+pub enum DirectMsgData {
+    /// Start the generation process
+    GenStart(QueryId, Vec<String>, SignerConfig, u16),
+    /// Return the generated public_key key package
+    ReturnGen(QueryId, PublicKeyPackage),
+    /// Return the signature
+    ReturnSign(QueryId, Signature),
+    /// Send signing commitments to the signature requester
+    SigningPackage(QueryId, Identifier, SigningCommitments),
+}
+
 #[derive(NetworkBehaviour)]
 #[behaviour(to_swarm = "BehaviourEvent")]
 pub(crate) struct Behaviour {
@@ -159,8 +176,8 @@ impl Swarm {
         if self.input_tx.is_some() {
             return Err(SwarmError::ExecutionError);
         }
-        let (input_tx, input_rx) = async_channel::unbounded::<SwarmInput>();
-        let (output_tx, output_rx) = async_channel::unbounded::<SwarmOutput>();
+        let (input_tx, input_rx) = async_channel::bounded(32);
+        let (output_tx, output_rx) = async_channel::bounded(32);
         self.input_tx = Some(input_tx);
         let libp2p_swarm = create_libp2p_swarm(self)?;
         let executor = self.executor;
@@ -267,7 +284,14 @@ impl Swarm {
             .take(32)
             .map(char::from)
             .collect::<String>();
-        let send_message = SwarmInput::Sign(query_id.clone(), pubkey.serialize().to_vec(), message);
+        let send_message = SwarmInput::Sign(
+            query_id.clone(),
+            pubkey
+                .serialize()
+                .map_err(|_| SwarmError::MessageProcessingError)?
+                .to_vec(),
+            message,
+        );
         self.input_tx
             .as_mut()
             .ok_or(SwarmError::ConfigurationError)?
@@ -452,7 +476,7 @@ pub(crate) fn create_libp2p_swarm(config: &Swarm) -> Result<Libp2pSwarm<Behaviou
             )
             .unwrap(),
             identify: identify::Behaviour::new(identify::Config::new(
-                PROTOCOL_VERSION.clone(),
+                PROTOCOL_VERSION.to_string(),
                 keypair.public(),
             )),
             kad: Kademlia::with_config(
@@ -461,10 +485,7 @@ pub(crate) fn create_libp2p_swarm(config: &Swarm) -> Result<Libp2pSwarm<Behaviou
                 KademliaConfig::default(),
             ),
             req_res: request_response::cbor::Behaviour::new(
-                [(
-                    StreamProtocol::new(&PROTOCOL_VERSION),
-                    ProtocolSupport::Full,
-                )],
+                [(StreamProtocol::new(PROTOCOL_VERSION), ProtocolSupport::Full)],
                 request_response::Config::default(),
             ),
         })

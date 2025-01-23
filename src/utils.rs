@@ -3,11 +3,9 @@ use async_io::Timer;
 use dashmap::DashMap;
 use futures::future::BoxFuture;
 use libp2p::{swarm::Executor, PeerId, Swarm as Libp2pSwarm};
-use once_cell::sync::Lazy;
 use std::{hash::Hash, sync::Arc, time::Duration};
 
-pub static PROTOCOL_VERSION: Lazy<String> =
-    Lazy::new(|| format!("/FROSTore/{}", env!("CARGO_PKG_VERSION")));
+pub const PROTOCOL_VERSION: &str = concat!("/FROSTore/", env!("CARGO_PKG_VERSION"));
 
 pub(crate) fn peerid_from_multiaddress(multiaddr: &Multiaddr) -> Option<PeerId> {
     multiaddr.iter().find_map(|protocol| match protocol {

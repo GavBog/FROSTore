@@ -1,4 +1,4 @@
-pub use crate::swarm::Swarm;
+pub use crate::swarm::{DirectMsgData, Swarm};
 use crate::{
     client::{ReqGenerate, ReqSign},
     gen::{gen_start, send_final_gen, GenerationMessage, Generator},
@@ -8,7 +8,6 @@ use crate::{
 use dashmap::DashMap;
 use frost_ed25519::{
     keys::{KeyPackage, PublicKeyPackage},
-    round1::SigningCommitments,
     Identifier,
 };
 pub use frost_ed25519::{Signature, VerifyingKey};
@@ -56,20 +55,6 @@ pub struct SignerConfig {
     max_signers: u16,
     /// The minimum threshold of signers required to sign a message
     min_signers: u16,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-/// Data sent between peers on the network All data is sent as a DirectMessage is a
-/// request-response pattern
-pub enum DirectMsgData {
-    /// Start the generation process
-    GenStart(QueryId, Vec<String>, SignerConfig, u16),
-    /// Return the generated public_key key package
-    ReturnGen(QueryId, PublicKeyPackage),
-    /// Return the signature
-    ReturnSign(QueryId, Signature),
-    /// Send signing commitments to the signature requester
-    SigningPackage(QueryId, Identifier, SigningCommitments),
 }
 
 #[derive(Deserialize, Serialize)]
@@ -201,8 +186,7 @@ async fn start_swarm(
                         }
                     }
                 }
-                GossipsubEvent::Unsubscribed { .. } => {}
-                GossipsubEvent::GossipsubNotSupported { .. } => {}
+                _ => {}
             }
             Ok(())
         };
@@ -253,7 +237,7 @@ async fn start_swarm(
                     handle_gossipsub_event(event, swarm)?;
                 }
                 BehaviourEvent::Identify(event) => {
-                    if let identify::Event::Received { peer_id, info } = event {
+                    if let identify::Event::Received { peer_id, info, .. } = event {
                         swarm
                             .behaviour_mut()
                             .kad

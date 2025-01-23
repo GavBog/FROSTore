@@ -60,7 +60,7 @@ async fn main() -> Result<()> {
                         // get the base64 encoded public key from the input and decode it
                         let pubkey = args.next().unwrap().to_string();
                         let pubkey = b64.decode(pubkey.as_bytes())?;
-                        let pubkey = VerifyingKey::deserialize(pubkey.try_into().unwrap())?;
+                        let pubkey = VerifyingKey::deserialize(&pubkey)?;
 
                         // get the message from the input
                         let message = args.collect::<Vec<_>>().join(" ").into_bytes();
@@ -80,8 +80,9 @@ async fn main() -> Result<()> {
                 match recv.unwrap() {
                     // Finished generating a new keypair
                     SwarmOutput::Generation(_, pubkey) => {
-                        let hsid = HsId::from(pubkey.serialize());
-                        info!("Generated Key: {}", b64.encode(pubkey.serialize()));
+                        let pubkey: [u8; 32] = pubkey.serialize()?.as_slice().try_into()?;
+                        let hsid = HsId::from(pubkey);
+                        info!("Generated Key: {}", b64.encode(pubkey));
                         info!("Onion Address: {}", hsid);
                     },
                     // Finished signing a message

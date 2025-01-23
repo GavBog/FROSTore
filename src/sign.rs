@@ -1,6 +1,8 @@
 use crate::{
-    client::ReqSign, swarm::SwarmError, utils::schedule_database_cleanup, Behaviour, DbData,
-    DirectMsgData, MessageData, QueryId, SwarmOutput,
+    client::ReqSign,
+    swarm::{DirectMsgData, SwarmError},
+    utils::schedule_database_cleanup,
+    Behaviour, DbData, MessageData, QueryId, SwarmOutput,
 };
 use base64::{engine::general_purpose::STANDARD_NO_PAD as b64, Engine as Base64Engine};
 use dashmap::{mapref::one::RefMut, DashMap};
@@ -263,14 +265,8 @@ pub(crate) fn send_signature(
     let signer_requester = signer_requester_db
         .get(&query_id)
         .ok_or(SwarmError::DatabaseError)?;
-    let pubkey = VerifyingKey::deserialize(
-        signer_requester
-            .pubkey
-            .clone()
-            .try_into()
-            .map_err(|_| SwarmError::MessageProcessingError)?,
-    )
-    .map_err(|_| SwarmError::MessageProcessingError)?;
+    let pubkey = VerifyingKey::deserialize(&signer_requester.pubkey)
+        .map_err(|_| SwarmError::MessageProcessingError)?;
     let valid = pubkey.verify(&signer_requester.message, &signature).is_ok();
     if !valid {
         return Err(SwarmError::InvalidSignature);

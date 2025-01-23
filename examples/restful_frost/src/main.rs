@@ -80,7 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn generate(State(mut swarm): State<Swarm>) -> impl IntoResponse {
     info!("Generating FROSTore Threshold Signature...");
     let (_, response) = swarm.generate(MIN_THRESHOLD, TOTAL_PEERS).unwrap();
-    let response = response.await.unwrap().serialize();
+    let response = response.await.unwrap().serialize().unwrap();
     info!("FROSTore Threshold Signature Generated!");
     response
 }
@@ -94,9 +94,9 @@ struct Data {
 async fn sign(State(mut swarm): State<Swarm>, Json(payload): Json<Data>) -> impl IntoResponse {
     let message = b64.decode(payload.message.as_bytes()).unwrap();
     let pubkey = b64.decode(payload.pubkey.as_bytes()).unwrap();
-    let pubkey = VerifyingKey::deserialize(pubkey.try_into().unwrap()).unwrap();
+    let pubkey = VerifyingKey::deserialize(&pubkey).unwrap();
     let (_, response) = swarm.sign(pubkey, message).unwrap();
-    response.await.unwrap().serialize()
+    response.await.unwrap().serialize().unwrap()
 }
 
 async fn index() -> impl IntoResponse {

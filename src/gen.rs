@@ -241,7 +241,12 @@ fn handle_final_generation(
     let db_length = generator.insert_r2(received_identifier, round2_package)?;
     if db_length + 1 >= generator.signer_config.max_signers as usize {
         let (pubkey_package, key_package) = generator.gen_final()?;
-        let new_topic = b64.encode(pubkey_package.verifying_key().serialize());
+        let new_topic = b64.encode(
+            pubkey_package
+                .verifying_key()
+                .serialize()
+                .map_err(|_| SwarmError::MessageProcessingError)?,
+        );
         swarm
             .behaviour_mut()
             .gossipsub
@@ -249,7 +254,11 @@ fn handle_final_generation(
             .map_err(|_| SwarmError::MessageProcessingError)?;
         return_gen(swarm, &mut generator, pubkey_package.clone())?;
         database.insert(
-            pubkey_package.verifying_key().serialize().to_vec(),
+            pubkey_package
+                .verifying_key()
+                .serialize()
+                .map_err(|_| SwarmError::MessageProcessingError)?
+                .to_vec(),
             DbData {
                 identifier: Some(generator.identifier),
                 key_package: Some(key_package),
@@ -282,7 +291,11 @@ pub(crate) fn send_final_gen(
         .ok_or(SwarmError::DatabaseError)?
         .1;
     database.insert(
-        pubkey_package.verifying_key().serialize().to_vec(),
+        pubkey_package
+            .verifying_key()
+            .serialize()
+            .map_err(|_| SwarmError::MessageProcessingError)?
+            .to_vec(),
         DbData {
             identifier: None,
             key_package: None,
