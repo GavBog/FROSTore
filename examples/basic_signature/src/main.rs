@@ -14,7 +14,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut swarm = Swarm::builder().build_and_exec()?;
 
     // Add the boot nodes to the client
-    for boot_node in BOOT_NODES.iter() {
+    for boot_node in BOOT_NODES {
         let multiaddr: Multiaddr = boot_node.parse()?;
         eprintln!("Adding peer: {:?}", multiaddr);
         swarm.add_peer(multiaddr)?.await?;
